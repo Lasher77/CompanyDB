@@ -5,13 +5,81 @@ Import und Suche von NorthData Firmendaten (JSONL-Dumps).
 ## Architektur
 
 - **PostgreSQL 14+**: Source of Truth für Companies + Persons
-- **OpenSearch 2.x**: Volltextsuche + Facetten/Filter
+- **OpenSearch 2.x**: Volltextsuche + Facetten/Filter (optional)
 - **FastAPI**: Backend API
-- **React/Vite**: Frontend (kommt in Slice 2)
+- **React/Vite/TypeScript**: Frontend mit Tailwind CSS
 
 ---
 
-## Installation
+## Aktueller Stand
+
+### Slice 1: Backend & Import-Infrastruktur ✅
+- PostgreSQL-Datenbank mit Companies, Persons, CompanyPerson-Relationen
+- OpenSearch-Integration (optional, konfigurierbar)
+- Batch-weiser JSONL-Import (1000 Records/Batch)
+- Import-Jobs mit Status-Tracking
+
+### Slice 2: Frontend ✅
+- Apple-Style UI mit React, Vite, TypeScript
+- Tailwind CSS + shadcn/ui Komponenten
+- Framer Motion Animationen
+- Seiten:
+  - **Suche**: Firmen-/Personensuche mit Filtern
+  - **Firmen-Detail**: Übersicht, verknüpfte Personen, Events, Raw JSON
+  - **Personen-Detail**: Übersicht, verknüpfte Firmen, Raw JSON
+  - **Import**: Dateiauswahl, Bestätigung, Fortschrittsanzeige
+
+---
+
+## Schnellstart
+
+### 1. Datenbank einrichten
+
+```bash
+# PostgreSQL Datenbank erstellen
+sudo -u postgres psql <<EOF
+CREATE USER companydb WITH PASSWORD 'companydb';
+CREATE DATABASE companydb OWNER companydb;
+GRANT ALL PRIVILEGES ON DATABASE companydb TO companydb;
+EOF
+```
+
+### 2. Backend starten
+
+```bash
+cd backend
+
+# Virtual Environment
+python3 -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Dependencies
+pip install -r requirements.txt
+
+# Server starten
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 3. Frontend starten
+
+```bash
+cd frontend
+
+# Dependencies
+npm install
+
+# Dev-Server starten
+npm run dev
+```
+
+### 4. Öffnen
+
+- **Frontend**: http://localhost:5173
+- **API Docs**: http://localhost:8000/docs
+
+---
+
+## Installation (Details)
 
 ### Option A: Mit Docker (empfohlen)
 
@@ -68,7 +136,9 @@ CREATE DATABASE companydb OWNER companydb;
 GRANT ALL PRIVILEGES ON DATABASE companydb TO companydb;
 ```
 
-#### 2. OpenSearch installieren
+#### 2. OpenSearch installieren (optional)
+
+OpenSearch ist optional. Ohne OpenSearch funktioniert die Suche über PostgreSQL.
 
 **Ubuntu/Debian:**
 ```bash
@@ -104,16 +174,6 @@ echo "plugins.security.disabled: true" >> /opt/homebrew/etc/opensearch/opensearc
 brew services start opensearch
 ```
 
-**Windows / Manuell (alle Plattformen):**
-1. Download: https://opensearch.org/downloads.html (TAR/ZIP)
-2. Entpacken nach z.B. `C:\opensearch` oder `/opt/opensearch`
-3. `config/opensearch.yml` bearbeiten:
-```yaml
-discovery.type: single-node
-plugins.security.disabled: true
-```
-4. Starten: `bin/opensearch` (Linux/Mac) oder `bin\opensearch.bat` (Windows)
-
 #### 3. Services prüfen
 
 ```bash
@@ -121,38 +181,63 @@ plugins.security.disabled: true
 pg_isready -h localhost -p 5432
 # Erwartete Ausgabe: localhost:5432 - accepting connections
 
-# OpenSearch
+# OpenSearch (falls installiert)
 curl http://localhost:9200
 # Erwartete Ausgabe: JSON mit cluster_name, version etc.
 ```
 
 ---
 
-## Backend starten
+## API Endpoints
 
-```bash
-cd backend
+### Health & Import
 
-# Virtual Environment erstellen
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+| Endpoint | Methode | Beschreibung |
+|----------|---------|--------------|
+| `/health` | GET | Health-Check (Postgres + OpenSearch) |
+| `/imports/files` | GET | Liste verfügbarer JSONL-Dateien in `data/` |
+| `/imports` | POST | Import-Job starten (`{"filename": "..."}`) |
+| `/imports` | GET | Alle Import-Jobs auflisten |
+| `/imports/{id}` | GET | Status eines Import-Jobs |
 
-# Dependencies installieren
-pip install -r requirements.txt
+### Firmen (Companies)
 
-# .env anlegen (optional - defaults passen für Standardinstallation)
-cp ../.env.example .env
+| Endpoint | Methode | Beschreibung |
+|----------|---------|--------------|
+| `/companies` | GET | Firmensuche mit Filtern |
+| `/companies/{id}` | GET | Firmen-Details mit verknüpften Personen |
 
-# Datenbank-Tabellen erstellen + Server starten
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+**Suchparameter:**
+- `q`: Suchbegriff (Name, Register-ID)
+- `status`: Firmenstatus filtern
+- `legal_form`: Rechtsform filtern
+- `city`: Stadt filtern
+- `limit`, `offset`: Paginierung
 
-API läuft auf: `http://localhost:8000`
-Swagger Docs: `http://localhost:8000/docs`
+### Personen (Persons)
+
+| Endpoint | Methode | Beschreibung |
+|----------|---------|--------------|
+| `/persons` | GET | Personensuche mit Filtern |
+| `/persons/{id}` | GET | Personen-Details mit verknüpften Firmen |
+
+**Suchparameter:**
+- `q`: Suchbegriff (Name)
+- `city`: Stadt filtern
+- `limit`, `offset`: Paginierung
 
 ---
 
 ## Import durchführen
+
+### Via Frontend (empfohlen)
+
+1. Frontend öffnen: http://localhost:5173
+2. Auf "Import" klicken
+3. Datei auswählen und "Importieren" klicken
+4. Fortschritt wird live angezeigt
+
+### Via API
 
 ```bash
 # 1. Health-Check (prüft DB + OpenSearch)
@@ -175,32 +260,74 @@ curl http://localhost:8000/imports
 
 ---
 
-## API Endpoints
+## Konfiguration
 
-| Endpoint | Methode | Beschreibung |
-|----------|---------|--------------|
-| `/health` | GET | Health-Check (Postgres + OpenSearch) |
-| `/imports/files` | GET | Liste verfügbarer JSONL-Dateien in `data/` |
-| `/imports` | POST | Import-Job starten (`{"filename": "..."}`) |
-| `/imports` | GET | Alle Import-Jobs auflisten |
-| `/imports/{id}` | GET | Status eines Import-Jobs |
-
----
-
-## Konfiguration (.env)
+### Backend (.env)
 
 ```bash
 # PostgreSQL
 DATABASE_URL=postgresql+asyncpg://companydb:companydb@localhost:5432/companydb
 DATABASE_URL_SYNC=postgresql://companydb:companydb@localhost:5432/companydb
 
-# OpenSearch
+# OpenSearch (optional)
 OPENSEARCH_HOST=localhost
 OPENSEARCH_PORT=9200
+OPENSEARCH_ENABLED=true  # auf false setzen, wenn ohne OpenSearch
 
 # Import
 DATA_DIRECTORY=./data
 IMPORT_BATCH_SIZE=1000
+```
+
+### Frontend (.env)
+
+```bash
+# API Base URL (optional, default: http://localhost:8000)
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+---
+
+## Projektstruktur
+
+```
+CompanyDB/
+├── data/                        # JSONL-Dumps hier ablegen
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI App
+│   │   ├── config.py            # Settings
+│   │   ├── database.py          # DB Connection
+│   │   ├── models.py            # SQLAlchemy Models
+│   │   ├── schemas.py           # Pydantic Schemas
+│   │   ├── opensearch_client.py
+│   │   └── routers/
+│   │       ├── health.py        # Health-Check
+│   │       ├── imports.py       # Import-Jobs
+│   │       ├── companies.py     # Firmen-API
+│   │       └── persons.py       # Personen-API
+│   └── requirements.txt
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── Layout.tsx       # App-Layout mit Navigation
+│   │   │   └── ui/              # shadcn/ui Komponenten
+│   │   ├── pages/
+│   │   │   ├── SearchPage.tsx   # Suche
+│   │   │   ├── CompanyDetailPage.tsx
+│   │   │   ├── PersonDetailPage.tsx
+│   │   │   └── ImportPage.tsx   # Import-Workflow
+│   │   ├── lib/
+│   │   │   ├── api.ts           # API-Client
+│   │   │   └── utils.ts         # Hilfsfunktionen
+│   │   ├── types/index.ts       # TypeScript-Interfaces
+│   │   └── App.tsx              # Router
+│   ├── package.json
+│   ├── tailwind.config.js
+│   ├── vite.config.ts
+│   └── tsconfig.json
+├── docker-compose.yml           # Docker Setup
+└── .env.example
 ```
 
 ---
@@ -219,25 +346,21 @@ JSONL-Dateien in `data/` ablegen. Wichtige Felder:
 
 ---
 
-## Projektstruktur
+## Tech Stack
 
-```
-CompanyDB/
-├── data/                    # JSONL-Dumps hier ablegen
-├── backend/
-│   ├── app/
-│   │   ├── main.py          # FastAPI App
-│   │   ├── config.py        # Settings
-│   │   ├── database.py      # DB Connection
-│   │   ├── models.py        # SQLAlchemy Models
-│   │   ├── schemas.py       # Pydantic Schemas
-│   │   ├── opensearch_client.py
-│   │   └── routers/
-│   │       ├── health.py
-│   │       └── imports.py
-│   └── requirements.txt
-├── docker-compose.yml       # Alternative: Docker Setup
-├── scripts/
-│   └── setup_db.py          # DB-Initialisierung
-└── .env.example
-```
+### Backend
+- **FastAPI**: Async Web Framework
+- **SQLAlchemy 2.0**: Async ORM
+- **PostgreSQL**: Relationale Datenbank
+- **OpenSearch**: Volltextsuche (optional)
+- **Pydantic**: Datenvalidierung
+
+### Frontend
+- **React 18**: UI Framework
+- **Vite**: Build Tool
+- **TypeScript**: Type Safety
+- **Tailwind CSS**: Styling
+- **shadcn/ui**: UI-Komponenten (Radix UI)
+- **Framer Motion**: Animationen
+- **React Router**: Routing
+- **Lucide**: Icons
