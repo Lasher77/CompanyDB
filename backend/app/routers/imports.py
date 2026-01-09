@@ -335,6 +335,7 @@ def run_import_job(job_id: UUID, file_path: Path):
 
             # Index persons to OpenSearch (only if available)
             if os_client:
+                logger.info("Indexing persons to OpenSearch...")
                 persons = db.query(Person).all()
                 os_person_batch = []
                 for person in persons:
@@ -366,8 +367,18 @@ def run_import_job(job_id: UUID, file_path: Path):
                     }
                     os_person_batch.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
 
+                    # Bulk index every 1000 persons
+                    if len(os_person_batch) >= 1000:
+                        bulk_index(os_client, os_person_batch)
+                        os_person_batch = []
+
                 if os_person_batch:
                     bulk_index(os_client, os_person_batch)
+
+                # Refresh indices to make documents searchable immediately
+                os_client.indices.refresh(index=COMPANY_INDEX)
+                os_client.indices.refresh(index=PERSON_INDEX)
+                logger.info(f"OpenSearch indexing completed: {companies_count} companies, {persons_count} persons")
 
             # Mark job as completed
             job.processed_lines = processed
