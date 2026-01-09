@@ -23,8 +23,8 @@ def get_opensearch_client():
     try:
         from ..opensearch_client import get_opensearch_client as get_os_client
         client = get_os_client()
-        # Quick health check
-        client.cluster.health(timeout="2s")
+        # Quick health check - ping is faster than cluster.health
+        client.ping()
         return client
     except Exception as e:
         logger.warning(f"OpenSearch not available: {e}")
