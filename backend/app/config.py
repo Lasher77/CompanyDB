@@ -7,9 +7,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://companydb:companydb@localhost:5432/companydb"
     database_url_sync: str = "postgresql://companydb:companydb@localhost:5432/companydb"
 
-    # OpenSearch
+    # OpenSearch (optional - set host to empty string to disable)
     opensearch_host: str = "localhost"
     opensearch_port: int = 9200
+    opensearch_enabled: bool = True  # Set to False to skip OpenSearch
 
     # Import settings
     data_directory: Path = Path(__file__).parent.parent.parent.parent / "data"

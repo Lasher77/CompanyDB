@@ -1,18 +1,18 @@
-import os
 import json
 import threading
+import logging
 from datetime import datetime
 from uuid import UUID
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 from sqlalchemy import select
 from ..database import get_db, sync_engine
 from ..models import ImportJob, Company, Person, CompanyPerson
 from ..schemas import ImportFileInfo, ImportJobCreate, ImportJobResponse
 from ..config import settings
-from ..opensearch_client import get_opensearch_client, COMPANY_INDEX, PERSON_INDEX, init_opensearch_indices
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
@@ -111,15 +111,25 @@ def run_import_job(job_id: UUID, file_path: Path):
         job.updated_at = datetime.utcnow()
         db.commit()
 
+        # OpenSearch client (optional)
+        os_client = None
+        COMPANY_INDEX = "companies"
+        PERSON_INDEX = "persons"
+
         try:
-            # Initialize OpenSearch indices
-            os_client = get_opensearch_client()
-            init_opensearch_indices(os_client)
+            # Initialize OpenSearch if enabled
+            if settings.opensearch_enabled:
+                try:
+                    from ..opensearch_client import get_opensearch_client, init_opensearch_indices
+                    os_client = get_opensearch_client()
+                    init_opensearch_indices(os_client)
+                    logger.info("OpenSearch initialized successfully")
+                except Exception as e:
+                    logger.warning(f"OpenSearch not available, skipping indexing: {e}")
+                    os_client = None
 
             batch_size = settings.import_batch_size
-            company_batch = []
             os_company_batch = []
-            os_person_batch = []
             persons_cache = {}  # person_id -> Person record
 
             processed = 0
@@ -167,7 +177,6 @@ def run_import_job(job_id: UUID, file_path: Path):
                             except:
                                 pass
                         existing.import_job_id = job_id
-                        company_db = existing
                     else:
                         # Create new company
                         company_db = Company(
@@ -193,26 +202,25 @@ def run_import_job(job_id: UUID, file_path: Path):
                         db.add(company_db)
                         companies_count += 1
 
-                    company_batch.append(company_db)
-
-                    # Prepare OpenSearch document for company
-                    os_company_doc = {
-                        "company_id": company_id,
-                        "raw_name": record.get("rawName"),
-                        "legal_name": name_obj.get("name"),
-                        "legal_form": name_obj.get("legalForm"),
-                        "status": record.get("status"),
-                        "terminated": record.get("terminated"),
-                        "register_unique_key": register_obj.get("uniqueKey"),
-                        "register_id": register_obj.get("id"),
-                        "address_city": address_obj.get("city"),
-                        "address_postal_code": address_obj.get("postalCode"),
-                        "address_country": address_obj.get("country"),
-                        "segment_codes_wz": segment_codes.get("wz", []),
-                        "segment_codes_nace": segment_codes.get("nace", []),
-                        "last_update_time": record.get("lastUpdateTime"),
-                    }
-                    os_company_batch.append({"_index": COMPANY_INDEX, "_id": company_id, "_source": os_company_doc})
+                    # Prepare OpenSearch document for company (only if OpenSearch available)
+                    if os_client:
+                        os_company_doc = {
+                            "company_id": company_id,
+                            "raw_name": record.get("rawName"),
+                            "legal_name": name_obj.get("name"),
+                            "legal_form": name_obj.get("legalForm"),
+                            "status": record.get("status"),
+                            "terminated": record.get("terminated"),
+                            "register_unique_key": register_obj.get("uniqueKey"),
+                            "register_id": register_obj.get("id"),
+                            "address_city": address_obj.get("city"),
+                            "address_postal_code": address_obj.get("postalCode"),
+                            "address_country": address_obj.get("country"),
+                            "segment_codes_wz": segment_codes.get("wz", []),
+                            "segment_codes_nace": segment_codes.get("nace", []),
+                            "last_update_time": record.get("lastUpdateTime"),
+                        }
+                        os_company_batch.append({"_index": COMPANY_INDEX, "_id": company_id, "_source": os_company_doc})
 
                     # Process related persons
                     related_persons = record.get("relatedPersons", {}).get("items", [])
@@ -251,7 +259,7 @@ def run_import_job(job_id: UUID, file_path: Path):
                         db.commit()
 
                         # Bulk index to OpenSearch
-                        if os_company_batch:
+                        if os_client and os_company_batch:
                             bulk_index(os_client, os_company_batch)
                             os_company_batch = []
 
@@ -262,12 +270,9 @@ def run_import_job(job_id: UUID, file_path: Path):
                         job.updated_at = datetime.utcnow()
                         db.commit()
 
-                        # Clear batch for memory
-                        company_batch = []
-
             # Process remaining batch
             db.commit()
-            if os_company_batch:
+            if os_client and os_company_batch:
                 bulk_index(os_client, os_company_batch)
 
             # Now create company_person relationships
@@ -328,40 +333,41 @@ def run_import_job(job_id: UUID, file_path: Path):
 
             db.commit()
 
-            # Index persons to OpenSearch
-            persons = db.query(Person).all()
-            os_person_batch = []
-            for person in persons:
-                # Get all companies for this person
-                company_roles = db.query(CompanyPerson, Company).join(Company).filter(
-                    CompanyPerson.person_db_id == person.id
-                ).all()
+            # Index persons to OpenSearch (only if available)
+            if os_client:
+                persons = db.query(Person).all()
+                os_person_batch = []
+                for person in persons:
+                    # Get all companies for this person
+                    company_roles = db.query(CompanyPerson, Company).join(Company).filter(
+                        CompanyPerson.person_db_id == person.id
+                    ).all()
 
-                roles_list = []
-                company_ids = []
-                for cp, company in company_roles:
-                    company_ids.append(company.company_id)
-                    roles_list.append({
-                        "company_id": company.company_id,
-                        "company_name": company.legal_name or company.raw_name,
-                        "role_type": cp.role_type,
-                        "role_date": cp.role_date.isoformat() if cp.role_date else None
-                    })
+                    roles_list = []
+                    company_ids = []
+                    for cp, company in company_roles:
+                        company_ids.append(company.company_id)
+                        roles_list.append({
+                            "company_id": company.company_id,
+                            "company_name": company.legal_name or company.raw_name,
+                            "role_type": cp.role_type,
+                            "role_date": cp.role_date.isoformat() if cp.role_date else None
+                        })
 
-                os_person_doc = {
-                    "person_id": person.person_id,
-                    "first_name": person.first_name,
-                    "last_name": person.last_name,
-                    "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip(),
-                    "birth_year": person.birth_year,
-                    "address_city": person.address_city,
-                    "company_ids": company_ids,
-                    "roles": roles_list,
-                }
-                os_person_batch.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
+                    os_person_doc = {
+                        "person_id": person.person_id,
+                        "first_name": person.first_name,
+                        "last_name": person.last_name,
+                        "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip(),
+                        "birth_year": person.birth_year,
+                        "address_city": person.address_city,
+                        "company_ids": company_ids,
+                        "roles": roles_list,
+                    }
+                    os_person_batch.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
 
-            if os_person_batch:
-                bulk_index(os_client, os_person_batch)
+                if os_person_batch:
+                    bulk_index(os_client, os_person_batch)
 
             # Mark job as completed
             job.processed_lines = processed
@@ -381,7 +387,7 @@ def run_import_job(job_id: UUID, file_path: Path):
 
 def bulk_index(client, actions: list[dict]):
     """Bulk index documents to OpenSearch."""
-    if not actions:
+    if not client or not actions:
         return
 
     body = []

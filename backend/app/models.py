@@ -29,14 +29,14 @@ class Company(Base):
     company_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     raw_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     legal_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    legal_form: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    legal_form: Mapped[str | None] = mapped_column(Text, nullable=True)  # Can be long
+    status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     terminated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    register_unique_key: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
-    register_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    address_city: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    address_postal_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    address_country: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    register_unique_key: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    register_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    address_city: Mapped[str | None] = mapped_column(Text, nullable=True)  # Can contain unexpected data
+    address_postal_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    address_country: Mapped[str | None] = mapped_column(String(10), nullable=True)
     last_update_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     full_record: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
@@ -50,10 +50,10 @@ class Person(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     person_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
-    first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(Text, nullable=True)  # Can be long/unusual
+    last_name: Mapped[str | None] = mapped_column(Text, nullable=True)   # Can be long/unusual
     birth_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    address_city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    address_city: Mapped[str | None] = mapped_column(Text, nullable=True)  # Can contain unexpected data
     full_record: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -67,7 +67,7 @@ class CompanyPerson(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company_db_id: Mapped[int] = mapped_column(Integer, ForeignKey("company.id"), nullable=False)
     person_db_id: Mapped[int] = mapped_column(Integer, ForeignKey("person.id"), nullable=False)
-    role_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    role_type: Mapped[str | None] = mapped_column(Text, nullable=True)  # Can be long
     role_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     role_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
 
