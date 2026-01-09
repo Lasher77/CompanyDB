@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     opensearch_enabled: bool = True  # Set to False to skip OpenSearch
 
     # Import settings
-    data_directory: Path = Path(__file__).parent.parent.parent.parent / "data"
+    data_directory: Path = Path(__file__).parent.parent.parent / "data"
     import_batch_size: int = 1000
 
     class Config:
