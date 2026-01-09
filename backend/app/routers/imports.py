@@ -396,3 +396,127 @@ def bulk_index(client, actions: list[dict]):
         body.append(action["_source"])
 
     client.bulk(body=body, refresh=False)
+
+
+@router.post("/reindex")
+async def reindex_opensearch():
+    """Reindex all existing data from PostgreSQL to OpenSearch."""
+    if not settings.opensearch_enabled:
+        raise HTTPException(status_code=400, detail="OpenSearch is not enabled")
+
+    # Start reindex in background thread
+    thread = threading.Thread(target=run_reindex)
+    thread.start()
+
+    return {"status": "started", "message": "Reindexing started in background"}
+
+
+def run_reindex():
+    """Run the reindex job in a background thread (sync)."""
+    from sqlalchemy.orm import sessionmaker
+    SessionLocal = sessionmaker(bind=sync_engine)
+
+    COMPANY_INDEX = "companies"
+    PERSON_INDEX = "persons"
+
+    try:
+        from ..opensearch_client import get_opensearch_client, init_opensearch_indices
+        os_client = get_opensearch_client()
+
+        # Create indices if they don't exist
+        init_opensearch_indices(os_client)
+        logger.info("OpenSearch indices initialized")
+
+        with SessionLocal() as db:
+            # Index all companies
+            companies = db.query(Company).all()
+            logger.info(f"Indexing {len(companies)} companies to OpenSearch")
+
+            os_company_batch = []
+            for company in companies:
+                full_record = company.full_record or {}
+                segment_codes = full_record.get("segmentCodes", {})
+
+                os_company_doc = {
+                    "company_id": company.company_id,
+                    "raw_name": company.raw_name,
+                    "legal_name": company.legal_name,
+                    "legal_form": company.legal_form,
+                    "status": company.status,
+                    "terminated": company.terminated,
+                    "register_unique_key": company.register_unique_key,
+                    "register_id": company.register_id,
+                    "address_city": company.address_city,
+                    "address_postal_code": company.address_postal_code,
+                    "address_country": company.address_country,
+                    "segment_codes_wz": segment_codes.get("wz", []),
+                    "segment_codes_nace": segment_codes.get("nace", []),
+                    "last_update_time": company.last_update_time.isoformat() if company.last_update_time else None,
+                }
+                os_company_batch.append({"_index": COMPANY_INDEX, "_id": company.company_id, "_source": os_company_doc})
+
+                # Bulk index every 1000 documents
+                if len(os_company_batch) >= 1000:
+                    bulk_index(os_client, os_company_batch)
+                    os_company_batch = []
+
+            # Index remaining companies
+            if os_company_batch:
+                bulk_index(os_client, os_company_batch)
+
+            logger.info(f"Companies indexed successfully")
+
+            # Index all persons
+            persons = db.query(Person).all()
+            logger.info(f"Indexing {len(persons)} persons to OpenSearch")
+
+            os_person_batch = []
+            for person in persons:
+                # Get all companies for this person
+                company_roles = db.query(CompanyPerson, Company).join(Company).filter(
+                    CompanyPerson.person_db_id == person.id
+                ).all()
+
+                roles_list = []
+                company_ids = []
+                for cp, company in company_roles:
+                    company_ids.append(company.company_id)
+                    roles_list.append({
+                        "company_id": company.company_id,
+                        "company_name": company.legal_name or company.raw_name,
+                        "role_type": cp.role_type,
+                        "role_date": cp.role_date.isoformat() if cp.role_date else None
+                    })
+
+                os_person_doc = {
+                    "person_id": person.person_id,
+                    "first_name": person.first_name,
+                    "last_name": person.last_name,
+                    "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip(),
+                    "birth_year": person.birth_year,
+                    "address_city": person.address_city,
+                    "company_ids": company_ids,
+                    "roles": roles_list,
+                }
+                os_person_batch.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
+
+                # Bulk index every 1000 documents
+                if len(os_person_batch) >= 1000:
+                    bulk_index(os_client, os_person_batch)
+                    os_person_batch = []
+
+            # Index remaining persons
+            if os_person_batch:
+                bulk_index(os_client, os_person_batch)
+
+            logger.info(f"Persons indexed successfully")
+
+            # Refresh indices to make documents searchable immediately
+            os_client.indices.refresh(index=COMPANY_INDEX)
+            os_client.indices.refresh(index=PERSON_INDEX)
+
+            logger.info("Reindex completed successfully")
+
+    except Exception as e:
+        logger.error(f"Reindex failed: {e}")
+        raise
