@@ -43,16 +43,26 @@ async def search_persons_opensearch(
     filter_clauses = []
 
     if q:
-        # Multi-match with fuzzy for name search
+        # Combine exact match (high boost) with controlled fuzzy match
         must_clauses.append({
             "bool": {
                 "should": [
+                    # Exact phrase match (highest priority)
+                    {
+                        "multi_match": {
+                            "query": q,
+                            "fields": ["first_name^2", "last_name^3", "full_name^2"],
+                            "type": "phrase"
+                        }
+                    },
+                    # Fuzzy match with restrictions (prefix must match)
                     {
                         "multi_match": {
                             "query": q,
                             "fields": ["first_name^1.5", "last_name^2", "full_name^1.5"],
                             "type": "best_fields",
-                            "fuzziness": "AUTO"
+                            "fuzziness": "1",
+                            "prefix_length": 2
                         }
                     },
                     # Exact match on ID

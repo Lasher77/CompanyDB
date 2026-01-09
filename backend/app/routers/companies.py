@@ -45,16 +45,26 @@ async def search_companies_opensearch(
     filter_clauses = []
 
     if q:
-        # Multi-match with fuzzy for name search
+        # Combine exact match (high boost) with controlled fuzzy match
         must_clauses.append({
             "bool": {
                 "should": [
+                    # Exact phrase match (highest priority)
+                    {
+                        "multi_match": {
+                            "query": q,
+                            "fields": ["raw_name^3", "legal_name^3"],
+                            "type": "phrase"
+                        }
+                    },
+                    # Fuzzy match with restrictions (prefix must match)
                     {
                         "multi_match": {
                             "query": q,
                             "fields": ["raw_name^2", "legal_name^2", "register_id"],
                             "type": "best_fields",
-                            "fuzziness": "AUTO"
+                            "fuzziness": "1",
+                            "prefix_length": 2
                         }
                     },
                     # Exact match on IDs
