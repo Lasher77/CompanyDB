@@ -37,6 +37,11 @@ class Company(Base):
     address_city: Mapped[str | None] = mapped_column(Text, nullable=True)  # Can contain unexpected data
     address_postal_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     address_country: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Contact fields
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    website: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    domain: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)  # Normalized domain for search
     last_update_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     full_record: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

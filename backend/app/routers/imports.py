@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import logging
 from datetime import datetime
@@ -24,6 +25,72 @@ def human_readable_size(size_bytes: int) -> str:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} TB"
+
+
+def extract_domain(url_or_email: str | None) -> str | None:
+    """Extract and normalize domain from URL or email address."""
+    if not url_or_email:
+        return None
+
+    value = url_or_email.lower().strip()
+
+    # Handle email addresses
+    if '@' in value:
+        value = value.split('@')[1]
+    else:
+        # Handle URLs - remove protocol
+        value = re.sub(r'^https?://', '', value)
+
+    # Remove www. prefix
+    value = re.sub(r'^www\.', '', value)
+
+    # Remove path and query string
+    value = value.split('/')[0].split('?')[0]
+
+    # Basic validation - should have at least one dot
+    if '.' not in value or len(value) < 4:
+        return None
+
+    return value
+
+
+def extract_contact_info(record: dict) -> dict:
+    """Extract email, website, phone and domain from NorthData record."""
+    email = None
+    website = None
+    phone = None
+    domain = None
+
+    extras = record.get('extras', [])
+    for extra in extras:
+        if not isinstance(extra, dict):
+            continue
+        items = extra.get('items', [])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get('id', '').lower()
+            value = item.get('value')
+
+            if item_id == 'email' and value:
+                email = value
+            elif item_id == 'url' and value:
+                website = value
+            elif item_id == 'phone' and value:
+                phone = value
+
+    # Extract domain from website or email
+    if website:
+        domain = extract_domain(website)
+    if not domain and email:
+        domain = extract_domain(email)
+
+    return {
+        'email': email,
+        'website': website,
+        'phone': phone,
+        'domain': domain
+    }
 
 
 @router.get("/files", response_model=list[ImportFileInfo])
@@ -156,6 +223,9 @@ def run_import_job(job_id: UUID, file_path: Path):
                     register_obj = record.get("register", {})
                     segment_codes = record.get("segmentCodes", {})
 
+                    # Extract contact info (email, website, phone, domain)
+                    contact_info = extract_contact_info(record)
+
                     # Check if company already exists
                     existing = db.query(Company).filter(Company.company_id == company_id).first()
                     if existing:
@@ -170,6 +240,10 @@ def run_import_job(job_id: UUID, file_path: Path):
                         existing.address_city = address_obj.get("city")
                         existing.address_postal_code = address_obj.get("postalCode")
                         existing.address_country = address_obj.get("country")
+                        existing.email = contact_info['email']
+                        existing.website = contact_info['website']
+                        existing.phone = contact_info['phone']
+                        existing.domain = contact_info['domain']
                         existing.full_record = record
                         if record.get("lastUpdateTime"):
                             try:
@@ -192,6 +266,10 @@ def run_import_job(job_id: UUID, file_path: Path):
                             address_city=address_obj.get("city"),
                             address_postal_code=address_obj.get("postalCode"),
                             address_country=address_obj.get("country"),
+                            email=contact_info['email'],
+                            website=contact_info['website'],
+                            phone=contact_info['phone'],
+                            domain=contact_info['domain'],
                             full_record=record,
                         )
                         if record.get("lastUpdateTime"):
@@ -216,6 +294,9 @@ def run_import_job(job_id: UUID, file_path: Path):
                             "address_city": address_obj.get("city"),
                             "address_postal_code": address_obj.get("postalCode"),
                             "address_country": address_obj.get("country"),
+                            "email": contact_info['email'],
+                            "website": contact_info['website'],
+                            "domain": contact_info['domain'],
                             "segment_codes_wz": segment_codes.get("wz", []),
                             "segment_codes_nace": segment_codes.get("nace", []),
                             "last_update_time": record.get("lastUpdateTime"),
@@ -448,6 +529,18 @@ def run_reindex():
                 full_record = company.full_record or {}
                 segment_codes = full_record.get("segmentCodes", {})
 
+                # Extract contact info from full_record (in case DB fields not yet populated)
+                contact_info = extract_contact_info(full_record)
+                domain = company.domain or contact_info.get('domain')
+                email = company.email or contact_info.get('email')
+                website = company.website or contact_info.get('website')
+
+                # Update DB record if domain was extracted but not stored
+                if domain and not company.domain:
+                    company.domain = domain
+                    company.email = email
+                    company.website = website
+
                 os_company_doc = {
                     "company_id": company.company_id,
                     "raw_name": company.raw_name,
@@ -460,6 +553,9 @@ def run_reindex():
                     "address_city": company.address_city,
                     "address_postal_code": company.address_postal_code,
                     "address_country": company.address_country,
+                    "email": email,
+                    "website": website,
+                    "domain": domain,
                     "segment_codes_wz": segment_codes.get("wz", []),
                     "segment_codes_nace": segment_codes.get("nace", []),
                     "last_update_time": company.last_update_time.isoformat() if company.last_update_time else None,
@@ -475,6 +571,8 @@ def run_reindex():
             if os_company_batch:
                 bulk_index(os_client, os_company_batch)
 
+            # Commit any domain updates to database
+            db.commit()
             logger.info(f"Companies indexed successfully")
 
             # Index all persons

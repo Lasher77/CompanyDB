@@ -30,6 +30,9 @@ COMPANY_MAPPING = {
             "address_city": {"type": "keyword"},
             "address_postal_code": {"type": "keyword"},
             "address_country": {"type": "keyword"},
+            "email": {"type": "keyword"},
+            "website": {"type": "keyword"},
+            "domain": {"type": "keyword"},  # Normalized domain for exact matching
             "segment_codes_wz": {"type": "keyword"},
             "segment_codes_nace": {"type": "keyword"},
             "last_update_time": {"type": "date"},

@@ -48,6 +48,9 @@ class MatchedCompany(BaseModel):
     address_country: Optional[str]
     register_id: Optional[str]
     register_unique_key: Optional[str]
+    email: Optional[str]
+    website: Optional[str]
+    domain: Optional[str]
     score: float
     match_details: dict
 
@@ -178,19 +181,16 @@ def score_company(company: Company, query: MatchQuery) -> tuple[float, dict]:
         else:
             scores['postal_code'] = 0.0
 
-    # Domain matching (from full_record)
+    # Domain matching - use normalized domain field from database
     if query.domain or query.email:
         query_domain = extract_domain(query.domain) or extract_domain(query.email)
-        if query_domain and company.full_record:
-            company_domain = ""
-            # Try to extract domain from company data
-            if company.full_record.get("website"):
-                company_domain = extract_domain(company.full_record.get("website"))
-            elif company.full_record.get("domain"):
-                company_domain = extract_domain(company.full_record.get("domain"))
-
+        if query_domain:
+            # Use the pre-computed domain field from the company record
+            company_domain = company.domain
             if company_domain and query_domain:
                 scores['domain'] = 1.0 if query_domain == company_domain else 0.0
+            else:
+                scores['domain'] = 0.0
 
     # Calculate weighted total score
     total_weight = 0.0
@@ -225,7 +225,7 @@ async def match_companies(
     db_query = select(Company)
     conditions = []
 
-    # Name search (required for meaningful results)
+    # Name search
     if query.name:
         search_term = f"%{query.name}%"
         conditions.append(
@@ -243,10 +243,16 @@ async def match_companies(
     if query.postal_code:
         conditions.append(Company.address_postal_code.ilike(f"{query.postal_code}%"))
 
+    # Domain filter (from website or email)
+    if query.domain or query.email:
+        query_domain = extract_domain(query.domain) or extract_domain(query.email)
+        if query_domain:
+            conditions.append(Company.domain == query_domain)
+
     if not conditions:
         raise HTTPException(
             status_code=400,
-            detail="At least one search criterion (name, city, or postal_code) is required"
+            detail="At least one search criterion (name, city, postal_code, domain, or email) is required"
         )
 
     db_query = db_query.where(or_(*conditions))
@@ -270,6 +276,9 @@ async def match_companies(
                 address_country=company.address_country,
                 register_id=company.register_id,
                 register_unique_key=company.register_unique_key,
+                email=company.email,
+                website=company.website,
+                domain=company.domain,
                 score=round(score, 3),
                 match_details=match_details
             ))
@@ -319,6 +328,12 @@ async def get_company_by_id(
             "register": {
                 "id": company.register_id,
                 "unique_key": company.register_unique_key
+            },
+            "contact": {
+                "email": company.email,
+                "website": company.website,
+                "phone": company.phone,
+                "domain": company.domain
             },
             "last_update_time": company.last_update_time.isoformat() if company.last_update_time else None,
             "full_record": company.full_record
