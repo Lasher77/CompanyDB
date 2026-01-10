@@ -7,7 +7,7 @@ import re
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, and_, func
 from pydantic import BaseModel, Field
 from ..database import get_db
 from ..models import Company
@@ -225,7 +225,7 @@ async def match_companies(
     db_query = select(Company)
     conditions = []
 
-    # Name search
+    # Name search (required as primary filter when provided)
     if query.name:
         search_term = f"%{query.name}%"
         conditions.append(
@@ -255,7 +255,8 @@ async def match_companies(
             detail="At least one search criterion (name, city, postal_code, domain, or email) is required"
         )
 
-    db_query = db_query.where(or_(*conditions))
+    # Use AND logic: all provided criteria must match
+    db_query = db_query.where(and_(*conditions))
     db_query = db_query.limit(100)  # Fetch more to filter by score later
 
     result = await db.execute(db_query)
