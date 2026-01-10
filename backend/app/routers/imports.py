@@ -563,16 +563,15 @@ async def reindex_opensearch():
         raise HTTPException(status_code=400, detail="OpenSearch is not enabled")
 
     # Start reindex in background thread
-    thread = threading.Thread(target=run_reindex)
+    thread = threading.Thread(target=run_reindex_fast)
     thread.start()
 
     return {"status": "started", "message": "Reindexing started in background"}
 
 
-def run_reindex():
-    """Run the reindex job in a background thread (sync)."""
-    from sqlalchemy.orm import sessionmaker
-    SessionLocal = sessionmaker(bind=sync_engine)
+def run_reindex_fast():
+    """Ultra-fast reindex using raw SQL and streaming."""
+    import gc  # Garbage collection for memory management
 
     COMPANY_INDEX = "companies"
     PERSON_INDEX = "persons"
@@ -585,107 +584,137 @@ def run_reindex():
         init_opensearch_indices(os_client)
         logger.info("OpenSearch indices initialized")
 
-        with SessionLocal() as db:
-            # Index all companies
-            total_companies = db.query(Company).count()
-            logger.info(f"Indexing {total_companies} companies to OpenSearch")
+        # Get raw connection for efficient streaming
+        raw_conn = sync_engine.raw_connection()
+        cursor = raw_conn.cursor(name='reindex_companies')  # Server-side cursor for streaming
+        cursor.itersize = 5000  # Fetch 5000 rows at a time from server
 
-            batch_size = 5000
-            os_company_batch = []
-            indexed_count = 0
+        # Count companies
+        count_cursor = raw_conn.cursor()
+        count_cursor.execute("SELECT COUNT(*) FROM company")
+        total_companies = count_cursor.fetchone()[0]
+        count_cursor.close()
+        logger.info(f"Reindexing {total_companies} companies...")
 
-            # Stream companies in chunks
-            for offset in range(0, total_companies, batch_size):
-                companies_chunk = db.query(Company).offset(offset).limit(batch_size).all()
+        # Stream companies using server-side cursor (no OFFSET needed)
+        cursor.execute("""
+            SELECT company_id, raw_name, legal_name, legal_form, status, terminated,
+                   register_unique_key, register_id, address_city, address_postal_code,
+                   address_country, email, website, domain, last_update_time
+            FROM company
+        """)
 
-                for company in companies_chunk:
-                    full_record = company.full_record or {}
-                    segment_codes = full_record.get("segmentCodes", {})
+        batch_size = 5000  # Reduced for memory
+        indexed_count = 0
 
-                    os_company_doc = {
-                        "company_id": company.company_id,
-                        "raw_name": company.raw_name,
-                        "legal_name": company.legal_name,
-                        "legal_form": company.legal_form,
-                        "status": company.status,
-                        "terminated": company.terminated,
-                        "register_unique_key": company.register_unique_key,
-                        "register_id": company.register_id,
-                        "address_city": company.address_city,
-                        "address_postal_code": company.address_postal_code,
-                        "address_country": company.address_country,
-                        "email": company.email,
-                        "website": company.website,
-                        "domain": company.domain,
-                        "segment_codes_wz": segment_codes.get("wz", []),
-                        "segment_codes_nace": segment_codes.get("nace", []),
-                        "last_update_time": company.last_update_time.isoformat() if company.last_update_time else None,
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+
+            # Build batch
+            os_batch = []
+            for row in rows:
+                os_batch.append({
+                    "_index": COMPANY_INDEX,
+                    "_id": row[0],
+                    "_source": {
+                        "company_id": row[0],
+                        "raw_name": row[1],
+                        "legal_name": row[2],
+                        "legal_form": row[3],
+                        "status": row[4],
+                        "terminated": row[5],
+                        "register_unique_key": row[6],
+                        "register_id": row[7],
+                        "address_city": row[8],
+                        "address_postal_code": row[9],
+                        "address_country": row[10],
+                        "email": row[11],
+                        "website": row[12],
+                        "domain": row[13],
+                        "last_update_time": row[14].isoformat() if row[14] else None,
                     }
-                    os_company_batch.append({"_index": COMPANY_INDEX, "_id": company.company_id, "_source": os_company_doc})
-
-                # Bulk index the chunk
-                if os_company_batch:
-                    bulk_index(os_client, os_company_batch)
-                    indexed_count += len(os_company_batch)
-                    logger.info(f"Indexed {indexed_count}/{total_companies} companies")
-                    os_company_batch = []
-
-            logger.info(f"Companies indexed successfully")
-
-            # Index persons
-            logger.info("Loading all relationships for person indexing...")
-            all_relationships = db.query(CompanyPerson, Person, Company).join(
-                Person, CompanyPerson.person_db_id == Person.id
-            ).join(
-                Company, CompanyPerson.company_db_id == Company.id
-            ).all()
-
-            # Group by person
-            logger.info("Building person documents...")
-            person_roles = defaultdict(lambda: {"person": None, "company_ids": [], "roles": []})
-            for cp, person, company in all_relationships:
-                person_roles[person.person_id]["person"] = person
-                person_roles[person.person_id]["company_ids"].append(company.company_id)
-                person_roles[person.person_id]["roles"].append({
-                    "company_id": company.company_id,
-                    "company_name": company.legal_name or company.raw_name,
-                    "role_type": cp.role_type,
-                    "role_date": cp.role_date.isoformat() if cp.role_date else None
                 })
 
-            # Build person documents
-            person_docs = []
-            for person_id, data in person_roles.items():
-                person = data["person"]
-                if not person:
-                    continue
+            # Bulk index and immediately free memory
+            bulk_index(os_client, os_batch)
+            indexed_count += len(os_batch)
+            logger.info(f"Companies: {indexed_count}/{total_companies}")
 
-                os_person_doc = {
-                    "person_id": person.person_id,
-                    "first_name": person.first_name,
-                    "last_name": person.last_name,
-                    "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip(),
-                    "birth_year": person.birth_year,
-                    "address_city": person.address_city,
-                    "company_ids": data["company_ids"],
-                    "roles": data["roles"],
-                }
-                person_docs.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
+            # Explicit cleanup
+            del os_batch
+            del rows
+            gc.collect()
 
-            # Bulk index persons in chunks
-            logger.info(f"Indexing {len(person_docs)} persons to OpenSearch")
-            for i in range(0, len(person_docs), 5000):
-                chunk = person_docs[i:i+5000]
-                bulk_index(os_client, chunk)
-                logger.info(f"Indexed {min(i+5000, len(person_docs))}/{len(person_docs)} persons")
+        cursor.close()
+        gc.collect()
+        logger.info("Companies indexed successfully")
 
-            # Refresh indices
-            logger.info("Refreshing indices...")
-            os_client.indices.refresh(index=COMPANY_INDEX)
-            os_client.indices.refresh(index=PERSON_INDEX)
+        # Index persons - simplified without relationship enrichment for speed
+        logger.info("Indexing persons...")
+        cursor = raw_conn.cursor(name='reindex_persons')
+        cursor.itersize = 5000
 
-            logger.info("Reindex completed successfully")
+        count_cursor = raw_conn.cursor()
+        count_cursor.execute("SELECT COUNT(*) FROM person")
+        total_persons = count_cursor.fetchone()[0]
+        count_cursor.close()
+        logger.info(f"Reindexing {total_persons} persons...")
+
+        cursor.execute("""
+            SELECT person_id, first_name, last_name, birth_year, address_city
+            FROM person
+        """)
+
+        indexed_count = 0
+
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+
+            os_batch = []
+            for row in rows:
+                full_name = f"{row[1] or ''} {row[2] or ''}".strip()
+                os_batch.append({
+                    "_index": PERSON_INDEX,
+                    "_id": row[0],
+                    "_source": {
+                        "person_id": row[0],
+                        "first_name": row[1],
+                        "last_name": row[2],
+                        "full_name": full_name,
+                        "birth_year": row[3],
+                        "address_city": row[4],
+                        "company_ids": [],
+                        "roles": [],
+                    }
+                })
+
+            bulk_index(os_client, os_batch)
+            indexed_count += len(os_batch)
+            logger.info(f"Persons: {indexed_count}/{total_persons}")
+
+            del os_batch
+            del rows
+            gc.collect()
+
+        cursor.close()
+        raw_conn.close()
+
+        # Refresh indices
+        logger.info("Refreshing indices...")
+        os_client.indices.refresh(index=COMPANY_INDEX)
+        os_client.indices.refresh(index=PERSON_INDEX)
+
+        logger.info("Reindex completed successfully!")
 
     except Exception as e:
         logger.error(f"Reindex failed: {e}", exc_info=True)
         raise
+
+
+def run_reindex():
+    """Legacy reindex - redirects to fast version."""
+    run_reindex_fast()
