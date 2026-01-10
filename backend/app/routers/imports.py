@@ -571,6 +571,8 @@ async def reindex_opensearch():
 
 def run_reindex_fast():
     """Ultra-fast reindex using raw SQL and streaming."""
+    import gc  # Garbage collection for memory management
+
     COMPANY_INDEX = "companies"
     PERSON_INDEX = "persons"
 
@@ -585,6 +587,7 @@ def run_reindex_fast():
         # Get raw connection for efficient streaming
         raw_conn = sync_engine.raw_connection()
         cursor = raw_conn.cursor(name='reindex_companies')  # Server-side cursor for streaming
+        cursor.itersize = 5000  # Fetch 5000 rows at a time from server
 
         # Count companies
         count_cursor = raw_conn.cursor()
@@ -601,8 +604,7 @@ def run_reindex_fast():
             FROM company
         """)
 
-        batch_size = 10000
-        os_batch = []
+        batch_size = 5000  # Reduced for memory
         indexed_count = 0
 
         while True:
@@ -610,39 +612,49 @@ def run_reindex_fast():
             if not rows:
                 break
 
+            # Build batch
+            os_batch = []
             for row in rows:
-                os_doc = {
-                    "company_id": row[0],
-                    "raw_name": row[1],
-                    "legal_name": row[2],
-                    "legal_form": row[3],
-                    "status": row[4],
-                    "terminated": row[5],
-                    "register_unique_key": row[6],
-                    "register_id": row[7],
-                    "address_city": row[8],
-                    "address_postal_code": row[9],
-                    "address_country": row[10],
-                    "email": row[11],
-                    "website": row[12],
-                    "domain": row[13],
-                    "last_update_time": row[14].isoformat() if row[14] else None,
-                }
-                os_batch.append({"_index": COMPANY_INDEX, "_id": row[0], "_source": os_doc})
+                os_batch.append({
+                    "_index": COMPANY_INDEX,
+                    "_id": row[0],
+                    "_source": {
+                        "company_id": row[0],
+                        "raw_name": row[1],
+                        "legal_name": row[2],
+                        "legal_form": row[3],
+                        "status": row[4],
+                        "terminated": row[5],
+                        "register_unique_key": row[6],
+                        "register_id": row[7],
+                        "address_city": row[8],
+                        "address_postal_code": row[9],
+                        "address_country": row[10],
+                        "email": row[11],
+                        "website": row[12],
+                        "domain": row[13],
+                        "last_update_time": row[14].isoformat() if row[14] else None,
+                    }
+                })
 
-            # Bulk index
-            if os_batch:
-                bulk_index(os_client, os_batch)
-                indexed_count += len(os_batch)
-                logger.info(f"Companies: {indexed_count}/{total_companies}")
-                os_batch = []
+            # Bulk index and immediately free memory
+            bulk_index(os_client, os_batch)
+            indexed_count += len(os_batch)
+            logger.info(f"Companies: {indexed_count}/{total_companies}")
+
+            # Explicit cleanup
+            del os_batch
+            del rows
+            gc.collect()
 
         cursor.close()
+        gc.collect()
         logger.info("Companies indexed successfully")
 
         # Index persons - simplified without relationship enrichment for speed
         logger.info("Indexing persons...")
         cursor = raw_conn.cursor(name='reindex_persons')
+        cursor.itersize = 5000
 
         count_cursor = raw_conn.cursor()
         count_cursor.execute("SELECT COUNT(*) FROM person")
@@ -655,7 +667,6 @@ def run_reindex_fast():
             FROM person
         """)
 
-        os_batch = []
         indexed_count = 0
 
         while True:
@@ -663,25 +674,31 @@ def run_reindex_fast():
             if not rows:
                 break
 
+            os_batch = []
             for row in rows:
                 full_name = f"{row[1] or ''} {row[2] or ''}".strip()
-                os_doc = {
-                    "person_id": row[0],
-                    "first_name": row[1],
-                    "last_name": row[2],
-                    "full_name": full_name,
-                    "birth_year": row[3],
-                    "address_city": row[4],
-                    "company_ids": [],  # Skip for speed - can be enriched later if needed
-                    "roles": [],
-                }
-                os_batch.append({"_index": PERSON_INDEX, "_id": row[0], "_source": os_doc})
+                os_batch.append({
+                    "_index": PERSON_INDEX,
+                    "_id": row[0],
+                    "_source": {
+                        "person_id": row[0],
+                        "first_name": row[1],
+                        "last_name": row[2],
+                        "full_name": full_name,
+                        "birth_year": row[3],
+                        "address_city": row[4],
+                        "company_ids": [],
+                        "roles": [],
+                    }
+                })
 
-            if os_batch:
-                bulk_index(os_client, os_batch)
-                indexed_count += len(os_batch)
-                logger.info(f"Persons: {indexed_count}/{total_persons}")
-                os_batch = []
+            bulk_index(os_client, os_batch)
+            indexed_count += len(os_batch)
+            logger.info(f"Persons: {indexed_count}/{total_persons}")
+
+            del os_batch
+            del rows
+            gc.collect()
 
         cursor.close()
         raw_conn.close()
