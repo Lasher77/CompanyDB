@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CompanyDB API Tester</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f5f5f7;
+            color: #1d1d1f;
+            line-height: 1.5;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #1d1d1f;
+        }
+
+        h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #1d1d1f;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #6e6e73;
+            margin-bottom: 5px;
+        }
+
+        input, select {
+            padding: 10px 12px;
+            border: 1px solid #d2d2d7;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #0071e3;
+            box-shadow: 0 0 0 3px rgba(0,113,227,0.2);
+        }
+
+        .form-row {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        button {
+            padding: 12px 24px;
+            background: #0071e3;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #0077ed;
+        }
+
+        button:disabled {
+            background: #86868b;
+            cursor: not-allowed;
+        }
+
+        button.secondary {
+            background: #f5f5f7;
+            color: #1d1d1f;
+            border: 1px solid #d2d2d7;
+        }
+
+        button.secondary:hover {
+            background: #e8e8ed;
+        }
+
+        .status {
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-weight: 500;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status.loading {
+            background: #cce5ff;
+            color: #004085;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        .results-table th,
+        .results-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e8e8ed;
+        }
+
+        .results-table th {
+            background: #f5f5f7;
+            font-weight: 600;
+            color: #6e6e73;
+            font-size: 0.875rem;
+        }
+
+        .results-table tr:hover {
+            background: #f5f5f7;
+        }
+
+        .score-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+
+        .score-high {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .score-medium {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .score-low {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .json-output {
+            background: #1d1d1f;
+            color: #98c379;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+            font-size: 0.875rem;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .match-details {
+            font-size: 0.75rem;
+            color: #6e6e73;
+        }
+
+        .match-details span {
+            display: inline-block;
+            margin-right: 8px;
+            padding: 2px 6px;
+            background: #f5f5f7;
+            border-radius: 4px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .tab {
+            padding: 8px 16px;
+            background: #f5f5f7;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .tab.active {
+            background: #0071e3;
+            color: white;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .company-detail {
+            cursor: pointer;
+            color: #0071e3;
+        }
+
+        .company-detail:hover {
+            text-decoration: underline;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+            width: 90%;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #6e6e73;
+        }
+
+        .config-info {
+            font-size: 0.875rem;
+            color: #6e6e73;
+            margin-top: 10px;
+        }
+
+        .endpoint-display {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: #f5f5f7;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CompanyDB API Tester</h1>
+
+        <!-- Configuration -->
+        <div class="card">
+            <h2>API Konfiguration</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="apiUrl">API Base URL</label>
+                    <input type="text" id="apiUrl" value="http://localhost:8000" placeholder="http://localhost:8000">
+                </div>
+                <div class="form-group">
+                    <label for="bearerToken">Bearer Token (optional)</label>
+                    <input type="text" id="bearerToken" placeholder="mein-geheimer-key-123">
+                </div>
+            </div>
+            <div class="config-info">
+                Ohne Bearer Token läuft die API im Development-Modus (keine Authentifizierung erforderlich).
+            </div>
+        </div>
+
+        <!-- Match Query -->
+        <div class="card">
+            <h2>Company Match Query</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="queryName">Firmenname</label>
+                    <input type="text" id="queryName" placeholder="z.B. BVMW">
+                </div>
+                <div class="form-group">
+                    <label for="queryCity">Stadt</label>
+                    <input type="text" id="queryCity" placeholder="z.B. Berlin">
+                </div>
+                <div class="form-group">
+                    <label for="queryPostalCode">PLZ</label>
+                    <input type="text" id="queryPostalCode" placeholder="z.B. 10785">
+                </div>
+                <div class="form-group">
+                    <label for="queryDomain">Domain</label>
+                    <input type="text" id="queryDomain" placeholder="z.B. bvmw.de">
+                </div>
+                <div class="form-group">
+                    <label for="queryEmail">E-Mail</label>
+                    <input type="text" id="queryEmail" placeholder="z.B. info@bvmw.de">
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="minScore">Min. Score</label>
+                    <select id="minScore">
+                        <option value="0.3">0.3 (niedrig)</option>
+                        <option value="0.5" selected>0.5 (mittel)</option>
+                        <option value="0.7">0.7 (hoch)</option>
+                        <option value="0.9">0.9 (sehr hoch)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="maxResults">Max. Ergebnisse</label>
+                    <select id="maxResults">
+                        <option value="5">5</option>
+                        <option value="10" selected>10</option>
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <button onclick="executeMatch()" id="matchBtn">Match ausführen</button>
+                <button class="secondary" onclick="clearForm()">Formular leeren</button>
+                <button class="secondary" onclick="loadExample('bvmw')">Beispiel: BVMW</button>
+                <button class="secondary" onclick="loadExample('mueller')">Beispiel: Müller GmbH</button>
+            </div>
+
+            <div class="endpoint-display" id="endpointDisplay">
+                POST /api/v1/match
+            </div>
+        </div>
+
+        <!-- Results -->
+        <div class="card" id="resultsCard" style="display: none;">
+            <h2>Ergebnisse</h2>
+
+            <div id="statusMessage"></div>
+
+            <div class="tabs">
+                <button class="tab active" onclick="showTab('table')">Tabelle</button>
+                <button class="tab" onclick="showTab('json')">JSON Response</button>
+                <button class="tab" onclick="showTab('request')">Request Body</button>
+            </div>
+
+            <div id="tableTab" class="tab-content active">
+                <div id="resultsCount"></div>
+                <table class="results-table" id="resultsTable">
+                    <thead>
+                        <tr>
+                            <th>Score</th>
+                            <th>Name</th>
+                            <th>Rechtsform</th>
+                            <th>Stadt</th>
+                            <th>PLZ</th>
+                            <th>Domain</th>
+                            <th>Status</th>
+                            <th>Match Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultsBody">
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="jsonTab" class="tab-content">
+                <pre class="json-output" id="jsonOutput"></pre>
+            </div>
+
+            <div id="requestTab" class="tab-content">
+                <pre class="json-output" id="requestOutput"></pre>
+            </div>
+        </div>
+
+        <!-- Company Lookup -->
+        <div class="card">
+            <h2>Company Lookup (by ID)</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="companyId">Company ID</label>
+                    <input type="text" id="companyId" placeholder="z.B. 55415560">
+                </div>
+            </div>
+            <div class="form-row">
+                <button onclick="lookupCompany()" id="lookupBtn">Firma abrufen</button>
+            </div>
+            <div class="endpoint-display">
+                GET /api/v1/company/{company_id}
+            </div>
+        </div>
+
+        <!-- Company Detail Results -->
+        <div class="card" id="companyDetailCard" style="display: none;">
+            <h2>Firmendetails</h2>
+            <div id="companyDetailStatus"></div>
+            <pre class="json-output" id="companyDetailOutput"></pre>
+        </div>
+    </div>
+
+    <!-- Modal for company details -->
+    <div class="modal" id="companyModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Firmendetails</h2>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <pre class="json-output" id="modalContent"></pre>
+        </div>
+    </div>
+
+    <script>
+        // API Functions
+        async function executeMatch() {
+            const btn = document.getElementById('matchBtn');
+            btn.disabled = true;
+            btn.textContent = 'Lädt...';
+
+            const apiUrl = document.getElementById('apiUrl').value;
+            const bearerToken = document.getElementById('bearerToken').value;
+
+            const query = {};
+            const name = document.getElementById('queryName').value.trim();
+            const city = document.getElementById('queryCity').value.trim();
+            const postalCode = document.getElementById('queryPostalCode').value.trim();
+            const domain = document.getElementById('queryDomain').value.trim();
+            const email = document.getElementById('queryEmail').value.trim();
+
+            if (name) query.name = name;
+            if (city) query.city = city;
+            if (postalCode) query.postal_code = postalCode;
+            if (domain) query.domain = domain;
+            if (email) query.email = email;
+
+            if (Object.keys(query).length === 0) {
+                showStatus('error', 'Mindestens ein Suchkriterium erforderlich');
+                btn.disabled = false;
+                btn.textContent = 'Match ausführen';
+                return;
+            }
+
+            const requestBody = {
+                query: query,
+                options: {
+                    min_score: parseFloat(document.getElementById('minScore').value),
+                    max_results: parseInt(document.getElementById('maxResults').value)
+                }
+            };
+
+            document.getElementById('requestOutput').textContent = JSON.stringify(requestBody, null, 2);
+            document.getElementById('resultsCard').style.display = 'block';
+
+            try {
+                const headers = {
+                    'Content-Type': 'application/json'
+                };
+                if (bearerToken) {
+                    headers['Authorization'] = `Bearer ${bearerToken}`;
+                }
+
+                const response = await fetch(`${apiUrl}/api/v1/match`, {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify(requestBody)
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    showStatus('error', `Fehler ${response.status}: ${data.detail || JSON.stringify(data)}`);
+                    document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
+                } else {
+                    showStatus('success', `${data.count} Ergebnisse gefunden`);
+                    document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
+                    renderResults(data.results);
+                }
+
+            } catch (error) {
+                showStatus('error', `Verbindungsfehler: ${error.message}`);
+                document.getElementById('jsonOutput').textContent = error.toString();
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Match ausführen';
+        }
+
+        async function lookupCompany() {
+            const btn = document.getElementById('lookupBtn');
+            btn.disabled = true;
+            btn.textContent = 'Lädt...';
+
+            const apiUrl = document.getElementById('apiUrl').value;
+            const bearerToken = document.getElementById('bearerToken').value;
+            const companyId = document.getElementById('companyId').value.trim();
+
+            if (!companyId) {
+                document.getElementById('companyDetailCard').style.display = 'block';
+                document.getElementById('companyDetailStatus').innerHTML = '<div class="status error">Company ID erforderlich</div>';
+                btn.disabled = false;
+                btn.textContent = 'Firma abrufen';
+                return;
+            }
+
+            document.getElementById('companyDetailCard').style.display = 'block';
+
+            try {
+                const headers = {};
+                if (bearerToken) {
+                    headers['Authorization'] = `Bearer ${bearerToken}`;
+                }
+
+                const response = await fetch(`${apiUrl}/api/v1/company/${encodeURIComponent(companyId)}`, {
+                    method: 'GET',
+                    headers: headers
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    document.getElementById('companyDetailStatus').innerHTML =
+                        `<div class="status error">Fehler ${response.status}: ${data.detail || JSON.stringify(data)}</div>`;
+                } else {
+                    document.getElementById('companyDetailStatus').innerHTML =
+                        '<div class="status success">Firma gefunden</div>';
+                }
+
+                document.getElementById('companyDetailOutput').textContent = JSON.stringify(data, null, 2);
+
+            } catch (error) {
+                document.getElementById('companyDetailStatus').innerHTML =
+                    `<div class="status error">Verbindungsfehler: ${error.message}</div>`;
+                document.getElementById('companyDetailOutput').textContent = error.toString();
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Firma abrufen';
+        }
+
+        // UI Functions
+        function showStatus(type, message) {
+            const statusEl = document.getElementById('statusMessage');
+            statusEl.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        function renderResults(results) {
+            const tbody = document.getElementById('resultsBody');
+            tbody.innerHTML = '';
+
+            document.getElementById('resultsCount').textContent = `${results.length} Ergebnis(se)`;
+
+            results.forEach(company => {
+                const tr = document.createElement('tr');
+
+                const scoreClass = company.score >= 0.8 ? 'score-high' :
+                                   company.score >= 0.5 ? 'score-medium' : 'score-low';
+
+                const matchDetails = Object.entries(company.match_details || {})
+                    .map(([key, value]) => `<span>${key}: ${(value * 100).toFixed(0)}%</span>`)
+                    .join('');
+
+                tr.innerHTML = `
+                    <td><span class="score-badge ${scoreClass}">${(company.score * 100).toFixed(0)}%</span></td>
+                    <td><span class="company-detail" onclick="showCompanyDetail('${company.company_id}')">${company.name || '-'}</span></td>
+                    <td>${company.legal_form || '-'}</td>
+                    <td>${company.address_city || '-'}</td>
+                    <td>${company.address_postal_code || '-'}</td>
+                    <td>${company.domain || '-'}</td>
+                    <td>${company.status || '-'}</td>
+                    <td class="match-details">${matchDetails}</td>
+                `;
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+
+            event.target.classList.add('active');
+            document.getElementById(tabName + 'Tab').classList.add('active');
+        }
+
+        function clearForm() {
+            document.getElementById('queryName').value = '';
+            document.getElementById('queryCity').value = '';
+            document.getElementById('queryPostalCode').value = '';
+            document.getElementById('queryDomain').value = '';
+            document.getElementById('queryEmail').value = '';
+            document.getElementById('resultsCard').style.display = 'none';
+        }
+
+        function loadExample(type) {
+            clearForm();
+            if (type === 'bvmw') {
+                document.getElementById('queryName').value = 'BVMW';
+                document.getElementById('queryCity').value = 'Berlin';
+                document.getElementById('queryPostalCode').value = '10785';
+            } else if (type === 'mueller') {
+                document.getElementById('queryName').value = 'Müller GmbH';
+                document.getElementById('queryCity').value = 'München';
+            }
+        }
+
+        async function showCompanyDetail(companyId) {
+            document.getElementById('companyId').value = companyId;
+
+            const apiUrl = document.getElementById('apiUrl').value;
+            const bearerToken = document.getElementById('bearerToken').value;
+
+            try {
+                const headers = {};
+                if (bearerToken) {
+                    headers['Authorization'] = `Bearer ${bearerToken}`;
+                }
+
+                const response = await fetch(`${apiUrl}/api/v1/company/${encodeURIComponent(companyId)}`, {
+                    method: 'GET',
+                    headers: headers
+                });
+
+                const data = await response.json();
+
+                document.getElementById('modalTitle').textContent = data.company?.name || companyId;
+                document.getElementById('modalContent').textContent = JSON.stringify(data, null, 2);
+                document.getElementById('companyModal').classList.add('active');
+
+            } catch (error) {
+                alert('Fehler beim Laden der Firmendetails: ' + error.message);
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('companyModal').classList.remove('active');
+        }
+
+        // Close modal on outside click
+        document.getElementById('companyModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeModal();
+            }
+        });
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeModal();
+            }
+        });
+    </script>
+</body>
+</html>
