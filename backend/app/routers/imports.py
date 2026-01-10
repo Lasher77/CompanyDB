@@ -200,12 +200,11 @@ def run_import_job(job_id: UUID, file_path: Path):
             # OPTIMIZATION 1: Disable auto-commit and use larger batches
             batch_size = 5000  # Increased from 1000
 
-            # OPTIMIZATION 2: Load existing IDs into memory to avoid N+1 queries
-            # Only load IDs to avoid schema mismatch issues and reduce memory usage
-            logger.info("Loading existing company and person IDs into memory...")
-            existing_company_ids = {row[0] for row in db.query(Company.company_id).all()}
-            existing_person_ids = {row[0] for row in db.query(Person.person_id).all()}
-            logger.info(f"Loaded {len(existing_company_ids)} existing company IDs, {len(existing_person_ids)} existing person IDs")
+            # OPTIMIZATION 2: Load existing companies and persons into memory to avoid N+1 queries
+            logger.info("Loading existing companies and persons into memory...")
+            existing_companies = {c.company_id: c for c in db.query(Company).all()}
+            existing_persons = {p.person_id: p for p in db.query(Person).all()}
+            logger.info(f"Loaded {len(existing_companies)} existing companies, {len(existing_persons)} existing persons")
 
             # OPTIMIZATION 3: Disable indexes during import for PostgreSQL performance
             logger.info("Disabling non-essential indexes for faster import...")
@@ -223,7 +222,7 @@ def run_import_job(job_id: UUID, file_path: Path):
 
             # Prepare batch collections
             companies_to_insert = []
-            companies_to_upsert = []  # For updates via ON CONFLICT
+            companies_to_update = []
             persons_to_insert = []
             os_company_batch = []
 
@@ -262,6 +261,9 @@ def run_import_job(job_id: UUID, file_path: Path):
                     register_obj = record.get("register", {})
                     segment_codes = record.get("segmentCodes", {})
 
+                    # Extract contact information
+                    contact_obj = record.get("contact", {})
+
                     company_data = {
                         "company_id": company_id,
                         "raw_name": record.get("rawName"),
@@ -274,6 +276,10 @@ def run_import_job(job_id: UUID, file_path: Path):
                         "address_city": address_obj.get("city"),
                         "address_postal_code": address_obj.get("postalCode"),
                         "address_country": address_obj.get("country"),
+                        "email": contact_obj.get("email"),
+                        "website": contact_obj.get("website"),
+                        "phone": contact_obj.get("phone"),
+                        "domain": contact_obj.get("domain"),  # Will be populated by domain extraction logic later
                         "full_record": record,
                         "import_job_id": job_id,
                     }
@@ -286,14 +292,16 @@ def run_import_job(job_id: UUID, file_path: Path):
                         except:
                             pass
 
-                    # Check if company already exists by ID
-                    if company_id in existing_company_ids:
-                        # Existing company - will be upserted
-                        companies_to_upsert.append(company_data)
+                    # Check if company already exists in memory
+                    if company_id in existing_companies:
+                        # Update existing company
+                        existing = existing_companies[company_id]
+                        for key, value in company_data.items():
+                            setattr(existing, key, value)
+                        companies_to_update.append(existing)
                     else:
                         # New company
                         companies_to_insert.append(company_data)
-                        existing_company_ids.add(company_id)  # Track for future iterations
                         companies_count += 1
 
                     # Prepare OpenSearch document for company
@@ -310,9 +318,10 @@ def run_import_job(job_id: UUID, file_path: Path):
                             "address_city": address_obj.get("city"),
                             "address_postal_code": address_obj.get("postalCode"),
                             "address_country": address_obj.get("country"),
-                            "email": contact_info['email'],
-                            "website": contact_info['website'],
-                            "domain": contact_info['domain'],
+                            "email": contact_obj.get("email"),
+                            "website": contact_obj.get("website"),
+                            "phone": contact_obj.get("phone"),
+                            "domain": contact_obj.get("domain"),
                             "segment_codes_wz": segment_codes.get("wz", []),
                             "segment_codes_nace": segment_codes.get("nace", []),
                             "last_update_time": record.get("lastUpdateTime"),
@@ -331,7 +340,7 @@ def run_import_job(job_id: UUID, file_path: Path):
                         person_address = person_data.get("address", {})
 
                         # Check if person already exists (in DB or in current batch)
-                        if person_id not in existing_person_ids and person_id not in persons_in_import:
+                        if person_id not in existing_persons and person_id not in persons_in_import:
                             person_insert = {
                                 "person_id": person_id,
                                 "first_name": person_name.get("firstName"),
@@ -342,7 +351,6 @@ def run_import_job(job_id: UUID, file_path: Path):
                             }
                             persons_to_insert.append(person_insert)
                             persons_in_import[person_id] = {"roles": []}
-                            existing_person_ids.add(person_id)  # Track for future iterations
                             persons_count += 1
 
                     processed += 1
@@ -367,13 +375,10 @@ def run_import_job(job_id: UUID, file_path: Path):
                 db.bulk_insert_mappings(Company, companies_to_insert)
                 db.commit()
 
-            # Upsert existing companies using ON CONFLICT
-            if companies_to_upsert:
-                logger.info(f"Upserting {len(companies_to_upsert)} existing companies...")
-                # Use bulk_insert_mappings with manual ON CONFLICT handling
-                # For now, skip updates to avoid complexity - focus on inserts for performance
-                # In production, implement proper UPSERT via raw SQL if needed
-                logger.info(f"Skipping {len(companies_to_upsert)} existing companies (already in DB)")
+            # Commit updates for existing companies
+            if companies_to_update:
+                logger.info(f"Updating {len(companies_to_update)} existing companies...")
+                db.commit()
 
             # Insert all persons in one batch
             if persons_to_insert:
