@@ -210,11 +210,12 @@ def run_import_job(job_id: UUID, file_path: Path):
             logger.info("Disabling non-essential indexes for faster import...")
             try:
                 # Drop indexes that can be recreated (keep primary keys and unique constraints)
-                db.execute(text("DROP INDEX IF EXISTS ix_companies_legal_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_companies_raw_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_companies_register_id"))
-                db.execute(text("DROP INDEX IF EXISTS ix_persons_last_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_persons_first_name"))
+                # Table names are singular: company, person
+                db.execute(text("DROP INDEX IF EXISTS ix_company_legal_name"))
+                db.execute(text("DROP INDEX IF EXISTS ix_company_raw_name"))
+                db.execute(text("DROP INDEX IF EXISTS ix_company_register_id"))
+                db.execute(text("DROP INDEX IF EXISTS ix_person_last_name"))
+                db.execute(text("DROP INDEX IF EXISTS ix_person_first_name"))
                 db.commit()
                 logger.info("Indexes dropped successfully")
             except Exception as e:
@@ -450,11 +451,12 @@ def run_import_job(job_id: UUID, file_path: Path):
             # OPTIMIZATION 7: Recreate indexes
             logger.info("Recreating indexes...")
             try:
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_legal_name ON companies (legal_name)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_raw_name ON companies (raw_name)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_register_id ON companies (register_id)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_persons_last_name ON persons (last_name)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_persons_first_name ON persons (first_name)"))
+                # Table names are singular: company, person
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_legal_name ON company (legal_name)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_raw_name ON company (raw_name)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_register_id ON company (register_id)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_person_last_name ON person (last_name)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_person_first_name ON person (first_name)"))
                 db.commit()
                 logger.info("Indexes recreated successfully")
             except Exception as e:
