@@ -261,6 +261,9 @@ def run_import_job(job_id: UUID, file_path: Path):
                     register_obj = record.get("register", {})
                     segment_codes = record.get("segmentCodes", {})
 
+                    # Extract contact information
+                    contact_obj = record.get("contact", {})
+
                     company_data = {
                         "company_id": company_id,
                         "raw_name": record.get("rawName"),
@@ -273,6 +276,10 @@ def run_import_job(job_id: UUID, file_path: Path):
                         "address_city": address_obj.get("city"),
                         "address_postal_code": address_obj.get("postalCode"),
                         "address_country": address_obj.get("country"),
+                        "email": contact_obj.get("email"),
+                        "website": contact_obj.get("website"),
+                        "phone": contact_obj.get("phone"),
+                        "domain": contact_obj.get("domain"),  # Will be populated by domain extraction logic later
                         "full_record": record,
                         "import_job_id": job_id,
                     }
@@ -311,9 +318,10 @@ def run_import_job(job_id: UUID, file_path: Path):
                             "address_city": address_obj.get("city"),
                             "address_postal_code": address_obj.get("postalCode"),
                             "address_country": address_obj.get("country"),
-                            "email": contact_info['email'],
-                            "website": contact_info['website'],
-                            "domain": contact_info['domain'],
+                            "email": contact_obj.get("email"),
+                            "website": contact_obj.get("website"),
+                            "phone": contact_obj.get("phone"),
+                            "domain": contact_obj.get("domain"),
                             "segment_codes_wz": segment_codes.get("wz", []),
                             "segment_codes_nace": segment_codes.get("nace", []),
                             "last_update_time": record.get("lastUpdateTime"),
@@ -367,7 +375,7 @@ def run_import_job(job_id: UUID, file_path: Path):
                 db.bulk_insert_mappings(Company, companies_to_insert)
                 db.commit()
 
-            # Update existing companies
+            # Commit updates for existing companies
             if companies_to_update:
                 logger.info(f"Updating {len(companies_to_update)} existing companies...")
                 db.commit()
@@ -378,10 +386,11 @@ def run_import_job(job_id: UUID, file_path: Path):
                 db.bulk_insert_mappings(Person, persons_to_insert)
                 db.commit()
 
-            # Reload companies and persons with their database IDs
-            logger.info("Reloading companies and persons with DB IDs...")
-            companies_map = {c.company_id: c for c in db.query(Company).all()}
-            persons_map = {p.person_id: p for p in db.query(Person).all()}
+            # Load company and person ID mappings (external_id -> db_primary_key) for relationships
+            # Only load necessary fields to avoid schema mismatch issues
+            logger.info("Loading company and person ID mappings...")
+            companies_map = {company_id: db_id for db_id, company_id in db.query(Company.id, Company.company_id).all()}
+            persons_map = {person_id: db_id for db_id, person_id in db.query(Person.id, Person.person_id).all()}
 
             # OPTIMIZATION 6: Create relationships in bulk
             logger.info("Creating company-person relationships...")
@@ -394,8 +403,8 @@ def run_import_job(job_id: UUID, file_path: Path):
 
             for record in all_records:
                 company_id = record.get("id")
-                company_db = companies_map.get(company_id)
-                if not company_db:
+                company_db_id = companies_map.get(company_id)
+                if not company_db_id:
                     continue
 
                 related_persons = record.get("relatedPersons", {}).get("items", [])
@@ -405,8 +414,8 @@ def run_import_job(job_id: UUID, file_path: Path):
                     if not person_id:
                         continue
 
-                    person_db = persons_map.get(person_id)
-                    if not person_db:
+                    person_db_id = persons_map.get(person_id)
+                    if not person_db_id:
                         continue
 
                     # Get role info
@@ -421,11 +430,11 @@ def run_import_job(job_id: UUID, file_path: Path):
                             pass
 
                     # Check if relationship exists
-                    rel_key = (company_db.id, person_db.id, role_type)
+                    rel_key = (company_db_id, person_db_id, role_type)
                     if rel_key not in existing_relationships:
                         relationships_to_insert.append({
-                            "company_db_id": company_db.id,
-                            "person_db_id": person_db.id,
+                            "company_db_id": company_db_id,
+                            "person_db_id": person_db_id,
                             "role_type": role_type,
                             "role_description": role_desc,
                             "role_date": role_date,
