@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Salesforce Match Tester – /api/salesforce/match-company</title>
+    <style>
+        :root {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color-scheme: light dark;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background: #f3f3f3;
+        }
+        .app {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+        h1 {
+            font-size: 1.4rem;
+            margin-bottom: 0.5rem;
+        }
+        h2 {
+            font-size: 1.1rem;
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
+            gap: 16px;
+            align-items: flex-start;
+        }
+        .card {
+            background: #fff;
+            border-radius: 8px;
+            padding: 12px 14px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+        label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: block;
+            margin-top: 8px;
+            margin-bottom: 2px;
+        }
+        input, select, textarea {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 6px 8px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-size: 0.85rem;
+            font-family: inherit;
+        }
+        input:focus, textarea:focus, select:focus {
+            outline: 2px solid #4b8df8;
+            border-color: #4b8df8;
+        }
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+        .row {
+            display: flex;
+            gap: 8px;
+        }
+        .row > div {
+            flex: 1;
+        }
+        button {
+            margin-top: 10px;
+            padding: 8px 14px;
+            border-radius: 4px;
+            border: none;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        button.primary {
+            background: #2563eb;
+            color: white;
+        }
+        button.secondary {
+            background: #e5e7eb;
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 0.8rem;
+            font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }
+        .small {
+            font-size: 0.75rem;
+            color: #6b7280;
+        }
+        .status-bar {
+            font-size: 0.8rem;
+            margin-top: 6px;
+        }
+        .status-ok {
+            color: #16a34a;
+        }
+        .status-error {
+            color: #dc2626;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            background: #e5e7eb;
+            margin-left: 6px;
+        }
+        @media (max-width: 900px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <h1>Salesforce Match Tester <span class="badge">/api/salesforce/match-company</span></h1>
+    <p class="small">
+        Test-Tool für deinen FastAPI-Endpunkt mit Bearer-Auth, Query-Feldern, Options und Context.
+    </p>
+
+    <div class="card">
+        <h2>Verbindung & Authentifizierung</h2>
+        <div class="row">
+            <div>
+                <label for="baseUrl">Base URL (ohne Slash am Ende)</label>
+                <input id="baseUrl" value="http://localhost:8080" />
+                <p class="small">
+                    Beispiel: <code>http://localhost:8080</code>. Muss gesetzt sein.
+                </p>
+            </div>
+            <div>
+                <label for="path">Pfad</label>
+                <input id="path" value="/api/salesforce/match-company" />
+            </div>
+        </div>
+
+        <div class="row">
+            <div>
+                <label for="token">Salesforce Match API Token (ohne "Bearer")</label>
+                <input id="token" type="password" placeholder="geheimes-token" />
+                <p class="small">
+                    Wird als <code>Authorization: Bearer &lt;token&gt;</code> gesendet. Pflichtfeld.
+                </p>
+            </div>
+            <div>
+                <label for="preset">Testfall laden</label>
+                <select id="preset">
+                    <option value="">– Nichts ausgewählt –</option>
+                    <option value="name_plz">Name + PLZ</option>
+                    <option value="website">Domain / Website</option>
+                    <option value="register_id">Register-ID</option>
+                    <option value="vat_id">USt-ID</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid" style="margin-top: 16px;">
+        <div class="card">
+            <h2>Request-Daten</h2>
+
+            <h3 style="font-size:0.95rem;margin-bottom:4px;">query</h3>
+            <div class="row">
+                <div>
+                    <label for="q_name">Name</label>
+                    <input id="q_name" placeholder="Musterfirma GmbH" />
+                </div>
+            </div>
+            <div class="row">
+                <div>
+                    <label for="q_street">Straße</label>
+                    <input id="q_street" placeholder="Beispielstraße 5" />
+                </div>
+                <div>
+                    <label for="q_postal_code">PLZ</label>
+                    <input id="q_postal_code" placeholder="10115" />
+                </div>
+            </div>
+            <div class="row">
+                <div>
+                    <label for="q_city">Stadt</label>
+                    <input id="q_city" placeholder="Berlin" />
+                </div>
+                <div>
+                    <label for="q_country">Land</label>
+                    <input id="q_country" placeholder="DE" />
+                </div>
+            </div>
+            <div class="row">
+                <div>
+                    <label for="q_website">Website</label>
+                    <input id="q_website" placeholder="https://www.beispiel.de" />
+                </div>
+                <div>
+                    <label for="q_phone">Telefon</label>
+                    <input id="q_phone" placeholder="+49 30 123456" />
+                </div>
+            </div>
+            <div class="row">
+                <div>
+                    <label for="q_register_id">Register-ID</label>
+                    <input id="q_register_id" placeholder="HRB 12345 B" />
+                </div>
+                <div>
+                    <label for="q_vat_id">USt-ID (VAT)</label>
+                    <input id="q_vat_id" placeholder="DE123456789" />
+                </div>
+            </div>
+
+            <h3 style="font-size:0.95rem;margin-top:10px;margin-bottom:4px;">options</h3>
+            <div class="row">
+                <div>
+                    <label for="opt_min_score">min_score (0–1)</label>
+                    <input id="opt_min_score" type="number" step="0.01" min="0" max="1" value="0.5" />
+                </div>
+                <div>
+                    <label for="opt_max_results">max_results (1–50)</label>
+                    <input id="opt_max_results" type="number" min="1" max="50" value="10" />
+                </div>
+            </div>
+
+            <h3 style="font-size:0.95rem;margin-top:10px;margin-bottom:4px;">context (optional)</h3>
+            <div class="row">
+                <div>
+                    <label for="ctx_source">source</label>
+                    <input id="ctx_source" placeholder="salesforce" />
+                </div>
+                <div>
+                    <label for="ctx_object_type">object_type</label>
+                    <input id="ctx_object_type" placeholder="Account" />
+                </div>
+            </div>
+            <div class="row">
+                <div>
+                    <label for="ctx_external_id">external_id</label>
+                    <input id="ctx_external_id" placeholder="001XXXX..." />
+                </div>
+            </div>
+
+            <h3 style="font-size:0.95rem;margin-top:12px;margin-bottom:4px;">Request-JSON</h3>
+            <textarea id="requestJson" readonly></textarea>
+
+            <div class="row" style="margin-top:8px;align-items:center;">
+                <div>
+                    <button id="sendBtn" class="primary">Anfrage senden</button>
+                    <button id="formatBtn" class="secondary">JSON neu formatieren</button>
+                </div>
+                <div class="small" id="requestInfo"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Antwort</h2>
+            <div class="status-bar" id="statusBar">Noch keine Anfrage gesendet.</div>
+            <h3 style="font-size:0.9rem;margin-top:10px;margin-bottom:4px;">Roh-Response</h3>
+            <pre id="responseRaw">–</pre>
+
+            <h3 style="font-size:0.9rem;margin-top:10px;margin-bottom:4px;">Parsed JSON</h3>
+            <pre id="responseJson">–</pre>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    const els = {
+        baseUrl: document.getElementById("baseUrl"),
+        path: document.getElementById("path"),
+        token: document.getElementById("token"),
+        preset: document.getElementById("preset"),
+
+        q_name: document.getElementById("q_name"),
+        q_street: document.getElementById("q_street"),
+        q_postal_code: document.getElementById("q_postal_code"),
+        q_city: document.getElementById("q_city"),
+        q_country: document.getElementById("q_country"),
+        q_website: document.getElementById("q_website"),
+        q_phone: document.getElementById("q_phone"),
+        q_register_id: document.getElementById("q_register_id"),
+        q_vat_id: document.getElementById("q_vat_id"),
+
+        opt_min_score: document.getElementById("opt_min_score"),
+        opt_max_results: document.getElementById("opt_max_results"),
+
+        ctx_source: document.getElementById("ctx_source"),
+        ctx_object_type: document.getElementById("ctx_object_type"),
+        ctx_external_id: document.getElementById("ctx_external_id"),
+
+        requestJson: document.getElementById("requestJson"),
+        responseRaw: document.getElementById("responseRaw"),
+        responseJson: document.getElementById("responseJson"),
+        statusBar: document.getElementById("statusBar"),
+        sendBtn: document.getElementById("sendBtn"),
+        formatBtn: document.getElementById("formatBtn"),
+        requestInfo: document.getElementById("requestInfo")
+    };
+
+    function buildRequestBody() {
+        const query = {
+            name: els.q_name.value || null,
+            street: els.q_street.value || null,
+            postal_code: els.q_postal_code.value || null,
+            city: els.q_city.value || null,
+            country: els.q_country.value || null,
+            website: els.q_website.value || null,
+            phone: els.q_phone.value || null,
+            register_id: els.q_register_id.value || null,
+            vat_id: els.q_vat_id.value || null
+        };
+
+        const options = {
+            min_score: els.opt_min_score.value !== "" ? parseFloat(els.opt_min_score.value) : undefined,
+            max_results: els.opt_max_results.value !== "" ? parseInt(els.opt_max_results.value, 10) : undefined
+        };
+
+        const context = {
+            source: els.ctx_source.value || null,
+            object_type: els.ctx_object_type.value || null,
+            external_id: els.ctx_external_id.value || null
+        };
+
+        function clean(obj) {
+            const out = {};
+            for (const [k, v] of Object.entries(obj)) {
+                if (v !== null && v !== undefined && v !== "") {
+                    out[k] = v;
+                }
+            }
+            return out;
+        }
+
+        const body = {
+            query: clean(query)
+        };
+
+        const cleanOptions = clean(options);
+        if (Object.keys(cleanOptions).length > 0) {
+            body.options = cleanOptions;
+        }
+
+        const cleanContext = clean(context);
+        if (Object.keys(cleanContext).length > 0) {
+            body.context = cleanContext;
+        }
+
+        return body;
+    }
+
+    function updateRequestJson() {
+        const body = buildRequestBody();
+        els.requestJson.value = JSON.stringify(body, null, 2);
+        const fieldCount = Object.keys(body.query || {}).length;
+        els.requestInfo.textContent = "Query-Felder: " + fieldCount + " | " +
+            "min_score: " + (body.options?.min_score ?? "default 0.5") +
+            ", max_results: " + (body.options?.max_results ?? "default 10");
+    }
+
+    function applyPreset() {
+        const p = els.preset.value;
+
+        [
+            els.q_name, els.q_street, els.q_postal_code, els.q_city, els.q_country,
+            els.q_website, els.q_phone, els.q_register_id, els.q_vat_id
+        ].forEach(el => el.value = "");
+
+        if (p === "name_plz") {
+            els.q_name.value = "Musterfirma GmbH";
+            els.q_postal_code.value = "10115";
+            els.q_city.value = "Berlin";
+        } else if (p === "website") {
+            els.q_name.value = "Beispiel AG";
+            els.q_website.value = "https://www.beispiel.de";
+        } else if (p === "register_id") {
+            els.q_register_id.value = "HRB 12345 B";
+        } else if (p === "vat_id") {
+            els.q_vat_id.value = "DE123456789";
+        }
+        updateRequestJson();
+    }
+
+    async function sendRequest() {
+        const body = buildRequestBody();
+
+        if (!body.query || Object.keys(body.query).length === 0) {
+            els.statusBar.innerHTML =
+                '<span class="status-error">Fehler:</span> Mindestens ein Query-Feld muss gesetzt sein.';
+            return;
+        }
+
+        let url = (els.baseUrl.value || "").trim();
+        const path = (els.path.value || "").trim() || "/api/salesforce/match-company";
+
+        if (!url) {
+            alert("Bitte eine Base URL angeben, z. B. http://localhost:8080");
+            return;
+        }
+
+        if (url.endsWith("/")) {
+            url = url.slice(0, -1);
+        }
+        if (!path.startsWith("/")) {
+            url += "/" + path;
+        } else {
+            url += path;
+        }
+
+        const headers = {};
+        const token = els.token.value.trim();
+        if (!token) {
+            alert("Bitte ein Salesforce Match API Token eintragen.");
+            return;
+        }
+        headers["Authorization"] = "Bearer " + token;
+        headers["Content-Type"] = "application/json";
+
+        els.sendBtn.disabled = true;
+        els.statusBar.textContent = "Sende Anfrage...";
+        const started = performance.now();
+
+        try {
+            const res = await fetch(url, {
+                method: "POST",
+                headers,
+                body: JSON.stringify(body)
+            });
+            const text = await res.text();
+            const duration = performance.now() - started;
+
+            els.responseRaw.textContent = text || "–";
+
+            let parsed;
+            try {
+                parsed = JSON.parse(text);
+                els.responseJson.textContent = JSON.stringify(parsed, null, 2);
+            } catch {
+                els.responseJson.textContent = "Keine gültige JSON-Antwort.";
+            }
+
+            const statusClass = res.ok ? "status-ok" : "status-error";
+            els.statusBar.innerHTML =
+                `<span class="${statusClass}">Status ${res.status}</span> | ` +
+                `Dauer: ${duration.toFixed(1)} ms | URL: ${url}`;
+        } catch (err) {
+            els.responseRaw.textContent = String(err);
+            els.responseJson.textContent = "–";
+            els.statusBar.innerHTML =
+                `<span class="status-error">Request-Fehler:</span> ${String(err)}`;
+        } finally {
+            els.sendBtn.disabled = false;
+        }
+    }
+
+    function formatRequestJson() {
+        try {
+            const raw = els.requestJson.value;
+            const obj = JSON.parse(raw);
+            els.requestJson.value = JSON.stringify(obj, null, 2);
+        } catch (e) {
+            alert("Aktueller Request-JSON ist nicht gültig.");
+        }
+    }
+
+    [
+        els.q_name, els.q_street, els.q_postal_code, els.q_city, els.q_country,
+        els.q_website, els.q_phone, els.q_register_id, els.q_vat_id,
+        els.opt_min_score, els.opt_max_results,
+        els.ctx_source, els.ctx_object_type, els.ctx_external_id
+    ].forEach(el => el.addEventListener("input", updateRequestJson));
+
+    els.preset.addEventListener("change", applyPreset);
+    els.sendBtn.addEventListener("click", sendRequest);
+    els.formatBtn.addEventListener("click", formatRequestJson);
+
+    updateRequestJson();
+})();
+</script>
+</body>
+</html>
