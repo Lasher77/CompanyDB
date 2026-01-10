@@ -1,8 +1,23 @@
-import json
 import re
 import threading
 import logging
+import io
+import csv
 from datetime import datetime
+
+# Use orjson for 3-10x faster JSON parsing (especially on Apple Silicon)
+try:
+    import orjson
+    def json_loads(s):
+        return orjson.loads(s)
+    def json_dumps(obj):
+        return orjson.dumps(obj).decode('utf-8')
+except ImportError:
+    import json
+    def json_loads(s):
+        return json.loads(s)
+    def json_dumps(obj):
+        return json.dumps(obj, ensure_ascii=False)
 from uuid import UUID
 from pathlib import Path
 from typing import Dict, Set
@@ -143,7 +158,7 @@ async def create_import_job(
     await db.refresh(import_job)
 
     # Start background import in a separate thread (to not block async loop)
-    thread = threading.Thread(target=run_import_job, args=(import_job.id, file_path))
+    thread = threading.Thread(target=run_import_job_fast, args=(import_job.id, file_path))
     thread.start()
 
     return import_job
@@ -166,9 +181,31 @@ async def list_import_jobs(db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
-def run_import_job(job_id: UUID, file_path: Path):
-    """Run the import job in a background thread (sync) - OPTIMIZED VERSION."""
+def escape_copy_value(value) -> str:
+    """Escape a value for PostgreSQL COPY format."""
+    if value is None:
+        return "\\N"
+    if isinstance(value, bool):
+        return "t" if value else "f"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        # JSON - escape backslashes and tabs
+        s = json_dumps(value)
+        return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+    # String - escape special chars
+    s = str(value)
+    return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+
+def run_import_job_fast(job_id: UUID, file_path: Path):
+    """Ultra-fast import using PostgreSQL COPY and streaming."""
     from sqlalchemy.orm import sessionmaker
+    from sqlalchemy import create_engine
+    import psycopg2
+
     SessionLocal = sessionmaker(bind=sync_engine)
 
     with SessionLocal() as db:
@@ -180,66 +217,48 @@ def run_import_job(job_id: UUID, file_path: Path):
         job.updated_at = datetime.utcnow()
         db.commit()
 
-        # OpenSearch client (optional)
-        os_client = None
-        COMPANY_INDEX = "companies"
-        PERSON_INDEX = "persons"
-
         try:
-            # Initialize OpenSearch if enabled
-            if settings.opensearch_enabled:
-                try:
-                    from ..opensearch_client import get_opensearch_client, init_opensearch_indices
-                    os_client = get_opensearch_client()
-                    init_opensearch_indices(os_client)
-                    logger.info("OpenSearch initialized successfully")
-                except Exception as e:
-                    logger.warning(f"OpenSearch not available, skipping indexing: {e}")
-                    os_client = None
+            # Get raw psycopg2 connection for COPY
+            raw_conn = sync_engine.raw_connection()
+            cursor = raw_conn.cursor()
 
-            # OPTIMIZATION 1: Disable auto-commit and use larger batches
-            batch_size = 5000  # Increased from 1000
+            # Disable indexes for faster import
+            logger.info("Disabling indexes for faster import...")
+            cursor.execute("DROP INDEX IF EXISTS ix_company_legal_name")
+            cursor.execute("DROP INDEX IF EXISTS ix_company_raw_name")
+            cursor.execute("DROP INDEX IF EXISTS ix_company_register_id")
+            cursor.execute("DROP INDEX IF EXISTS ix_company_domain")
+            cursor.execute("DROP INDEX IF EXISTS ix_person_last_name")
+            cursor.execute("DROP INDEX IF EXISTS ix_person_first_name")
+            raw_conn.commit()
 
-            # OPTIMIZATION 2: Load existing companies and persons into memory to avoid N+1 queries
-            logger.info("Loading existing companies and persons into memory...")
-            existing_companies = {c.company_id: c for c in db.query(Company).all()}
-            existing_persons = {p.person_id: p for p in db.query(Person).all()}
-            logger.info(f"Loaded {len(existing_companies)} existing companies, {len(existing_persons)} existing persons")
+            # Load existing IDs to check for duplicates
+            logger.info("Loading existing company IDs...")
+            cursor.execute("SELECT company_id FROM company")
+            existing_company_ids = {row[0] for row in cursor.fetchall()}
+            logger.info(f"Found {len(existing_company_ids)} existing companies")
 
-            # OPTIMIZATION 3: Disable indexes during import for PostgreSQL performance
-            logger.info("Disabling non-essential indexes for faster import...")
-            try:
-                # Drop indexes that can be recreated (keep primary keys and unique constraints)
-                # Table names are singular: company, person
-                db.execute(text("DROP INDEX IF EXISTS ix_company_legal_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_company_raw_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_company_register_id"))
-                db.execute(text("DROP INDEX IF EXISTS ix_person_last_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_person_first_name"))
-                db.commit()
-                logger.info("Indexes dropped successfully")
-            except Exception as e:
-                logger.warning(f"Could not drop indexes: {e}")
+            cursor.execute("SELECT person_id FROM person")
+            existing_person_ids = {row[0] for row in cursor.fetchall()}
+            logger.info(f"Found {len(existing_person_ids)} existing persons")
 
-            # Prepare batch collections
-            companies_to_insert = []
-            companies_to_update = []
-            persons_to_insert = []
-            os_company_batch = []
+            # Prepare COPY buffers
+            company_buffer = io.StringIO()
+            person_buffer = io.StringIO()
 
-            # For relationships - store records to process later
-            all_records = []
+            # Track new persons to avoid duplicates within import
+            new_person_ids: Set[str] = set()
 
-            # Tracking
+            # For relationships - store minimal data
+            relationships_data = []  # List of (company_id, person_id, role_type, role_desc)
+
             processed = 0
             companies_count = 0
             persons_count = 0
+            batch_size = 50000
 
-            # Track persons seen in this import to build OpenSearch docs
-            persons_in_import = {}  # person_id -> (person_obj, roles_list)
+            logger.info("Starting streaming import...")
 
-            # OPTIMIZATION 4: Read file only once and prepare all data
-            logger.info("Reading and parsing JSONL file...")
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -248,86 +267,67 @@ def run_import_job(job_id: UUID, file_path: Path):
                         continue
 
                     try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
+                        record = json_loads(line)
+                    except (ValueError, TypeError):
                         processed += 1
                         continue
 
-                    all_records.append(record)
-
-                    # Extract company fields
                     company_id = record.get("id", "")
+
+                    # Skip if company already exists
+                    if company_id in existing_company_ids:
+                        processed += 1
+                        continue
+
+                    # Mark as existing to avoid duplicates in this import
+                    existing_company_ids.add(company_id)
+
+                    # Extract fields
                     name_obj = record.get("name", {})
                     address_obj = record.get("address", {})
                     register_obj = record.get("register", {})
-                    segment_codes = record.get("segmentCodes", {})
 
-                    # Extract contact information
-                    contact_obj = record.get("contact", {})
+                    # Extract contact info
+                    contact_info = extract_contact_info(record)
 
-                    company_data = {
-                        "company_id": company_id,
-                        "raw_name": record.get("rawName"),
-                        "legal_name": name_obj.get("name"),
-                        "legal_form": name_obj.get("legalForm"),
-                        "status": record.get("status"),
-                        "terminated": record.get("terminated"),
-                        "register_unique_key": register_obj.get("uniqueKey"),
-                        "register_id": register_obj.get("id"),
-                        "address_city": address_obj.get("city"),
-                        "address_postal_code": address_obj.get("postalCode"),
-                        "address_country": address_obj.get("country"),
-                        "email": contact_obj.get("email"),
-                        "website": contact_obj.get("website"),
-                        "phone": contact_obj.get("phone"),
-                        "domain": contact_obj.get("domain"),  # Will be populated by domain extraction logic later
-                        "full_record": record,
-                        "import_job_id": job_id,
-                    }
-
+                    # Parse lastUpdateTime
+                    last_update_time = None
                     if record.get("lastUpdateTime"):
                         try:
-                            company_data["last_update_time"] = datetime.fromisoformat(
+                            last_update_time = datetime.fromisoformat(
                                 record["lastUpdateTime"].replace("Z", "+00:00")
                             )
                         except:
                             pass
 
-                    # Check if company already exists in memory
-                    if company_id in existing_companies:
-                        # Update existing company
-                        existing = existing_companies[company_id]
-                        for key, value in company_data.items():
-                            setattr(existing, key, value)
-                        companies_to_update.append(existing)
-                    else:
-                        # New company
-                        companies_to_insert.append(company_data)
-                        companies_count += 1
-
-                    # Prepare OpenSearch document for company
-                    if os_client:
-                        os_company_doc = {
-                            "company_id": company_id,
-                            "raw_name": record.get("rawName"),
-                            "legal_name": name_obj.get("name"),
-                            "legal_form": name_obj.get("legalForm"),
-                            "status": record.get("status"),
-                            "terminated": record.get("terminated"),
-                            "register_unique_key": register_obj.get("uniqueKey"),
-                            "register_id": register_obj.get("id"),
-                            "address_city": address_obj.get("city"),
-                            "address_postal_code": address_obj.get("postalCode"),
-                            "address_country": address_obj.get("country"),
-                            "email": contact_obj.get("email"),
-                            "website": contact_obj.get("website"),
-                            "phone": contact_obj.get("phone"),
-                            "domain": contact_obj.get("domain"),
-                            "segment_codes_wz": segment_codes.get("wz", []),
-                            "segment_codes_nace": segment_codes.get("nace", []),
-                            "last_update_time": record.get("lastUpdateTime"),
-                        }
-                        os_company_batch.append({"_index": COMPANY_INDEX, "_id": company_id, "_source": os_company_doc})
+                    # Build COPY line for company
+                    # Columns: import_job_id, company_id, raw_name, legal_name, legal_form, status,
+                    #          terminated, register_unique_key, register_id, address_city,
+                    #          address_postal_code, address_country, email, website, phone, domain,
+                    #          last_update_time, full_record, created_at
+                    company_line = "\t".join([
+                        escape_copy_value(str(job_id)),
+                        escape_copy_value(company_id),
+                        escape_copy_value(record.get("rawName")),
+                        escape_copy_value(name_obj.get("name")),
+                        escape_copy_value(name_obj.get("legalForm")),
+                        escape_copy_value(record.get("status")),
+                        escape_copy_value(record.get("terminated")),
+                        escape_copy_value(register_obj.get("uniqueKey")),
+                        escape_copy_value(register_obj.get("id")),
+                        escape_copy_value(address_obj.get("city")),
+                        escape_copy_value(address_obj.get("postalCode")),
+                        escape_copy_value(address_obj.get("country")),
+                        escape_copy_value(contact_info.get("email")),
+                        escape_copy_value(contact_info.get("website")),
+                        escape_copy_value(contact_info.get("phone")),
+                        escape_copy_value(contact_info.get("domain")),
+                        escape_copy_value(last_update_time),
+                        escape_copy_value(record),
+                        escape_copy_value(datetime.utcnow()),
+                    ])
+                    company_buffer.write(company_line + "\n")
+                    companies_count += 1
 
                     # Process related persons
                     related_persons = record.get("relatedPersons", {}).get("items", [])
@@ -337,31 +337,66 @@ def run_import_job(job_id: UUID, file_path: Path):
                         if not person_id:
                             continue
 
-                        person_name = person_data.get("name", {})
-                        person_address = person_data.get("address", {})
+                        # Store relationship data (minimal)
+                        roles = rp.get("roles", [])
+                        role_type = roles[0].get("type") if roles else rp.get("description")
+                        role_desc = rp.get("description")
+                        relationships_data.append((company_id, person_id, role_type, role_desc))
 
-                        # Check if person already exists (in DB or in current batch)
-                        if person_id not in existing_persons and person_id not in persons_in_import:
-                            person_insert = {
-                                "person_id": person_id,
-                                "first_name": person_name.get("firstName"),
-                                "last_name": person_name.get("lastName"),
-                                "birth_year": person_data.get("birthYear"),
-                                "address_city": person_address.get("city"),
-                                "full_record": person_data,
-                            }
-                            persons_to_insert.append(person_insert)
-                            persons_in_import[person_id] = {"roles": []}
+                        # Add person if not exists
+                        if person_id not in existing_person_ids and person_id not in new_person_ids:
+                            new_person_ids.add(person_id)
+
+                            person_name = person_data.get("name", {})
+                            person_address = person_data.get("address", {})
+
+                            # Build COPY line for person
+                            # Columns: person_id, first_name, last_name, birth_year, address_city, full_record, created_at
+                            person_line = "\t".join([
+                                escape_copy_value(person_id),
+                                escape_copy_value(person_name.get("firstName")),
+                                escape_copy_value(person_name.get("lastName")),
+                                escape_copy_value(person_data.get("birthYear")),
+                                escape_copy_value(person_address.get("city")),
+                                escape_copy_value(person_data),
+                                escape_copy_value(datetime.utcnow()),
+                            ])
+                            person_buffer.write(person_line + "\n")
                             persons_count += 1
 
                     processed += 1
 
-                    # OPTIMIZATION 5: Bulk insert in larger batches
-                    if len(companies_to_insert) >= batch_size:
-                        logger.info(f"Bulk inserting {len(companies_to_insert)} companies...")
-                        db.bulk_insert_mappings(Company, companies_to_insert)
-                        db.commit()
-                        companies_to_insert = []
+                    # Flush buffers periodically
+                    if companies_count > 0 and companies_count % batch_size == 0:
+                        logger.info(f"Flushing batch at {companies_count} companies...")
+
+                        # COPY companies
+                        company_buffer.seek(0)
+                        cursor.copy_from(
+                            company_buffer,
+                            'company',
+                            columns=('import_job_id', 'company_id', 'raw_name', 'legal_name', 'legal_form',
+                                    'status', 'terminated', 'register_unique_key', 'register_id',
+                                    'address_city', 'address_postal_code', 'address_country',
+                                    'email', 'website', 'phone', 'domain',
+                                    'last_update_time', 'full_record', 'created_at')
+                        )
+
+                        # COPY persons
+                        person_buffer.seek(0)
+                        if person_buffer.tell() > 0 or person_buffer.getvalue():
+                            cursor.copy_from(
+                                person_buffer,
+                                'person',
+                                columns=('person_id', 'first_name', 'last_name', 'birth_year',
+                                        'address_city', 'full_record', 'created_at')
+                            )
+
+                        raw_conn.commit()
+
+                        # Reset buffers
+                        company_buffer = io.StringIO()
+                        person_buffer = io.StringIO()
 
                         # Update progress
                         job.processed_lines = processed
@@ -370,159 +405,117 @@ def run_import_job(job_id: UUID, file_path: Path):
                         job.updated_at = datetime.utcnow()
                         db.commit()
 
-            # Insert remaining companies
-            if companies_to_insert:
-                logger.info(f"Bulk inserting final {len(companies_to_insert)} companies...")
-                db.bulk_insert_mappings(Company, companies_to_insert)
-                db.commit()
+                        logger.info(f"Progress: {processed}/{job.total_lines} lines, {companies_count} companies, {persons_count} persons")
 
-            # Commit updates for existing companies
-            if companies_to_update:
-                logger.info(f"Updating {len(companies_to_update)} existing companies...")
-                db.commit()
+            # Final flush
+            logger.info("Final flush...")
+            company_buffer.seek(0)
+            company_data = company_buffer.getvalue()
+            if company_data:
+                company_buffer = io.StringIO(company_data)
+                cursor.copy_from(
+                    company_buffer,
+                    'company',
+                    columns=('import_job_id', 'company_id', 'raw_name', 'legal_name', 'legal_form',
+                            'status', 'terminated', 'register_unique_key', 'register_id',
+                            'address_city', 'address_postal_code', 'address_country',
+                            'email', 'website', 'phone', 'domain',
+                            'last_update_time', 'full_record', 'created_at')
+                )
 
-            # Insert all persons in one batch
-            if persons_to_insert:
-                logger.info(f"Bulk inserting {len(persons_to_insert)} persons...")
-                db.bulk_insert_mappings(Person, persons_to_insert)
-                db.commit()
+            person_buffer.seek(0)
+            person_data = person_buffer.getvalue()
+            if person_data:
+                person_buffer = io.StringIO(person_data)
+                cursor.copy_from(
+                    person_buffer,
+                    'person',
+                    columns=('person_id', 'first_name', 'last_name', 'birth_year',
+                            'address_city', 'full_record', 'created_at')
+                )
 
-            # Load company and person ID mappings (external_id -> db_primary_key) for relationships
-            # Only load necessary fields to avoid schema mismatch issues
-            logger.info("Loading company and person ID mappings...")
-            companies_map = {company_id: db_id for db_id, company_id in db.query(Company.id, Company.company_id).all()}
-            persons_map = {person_id: db_id for db_id, person_id in db.query(Person.id, Person.person_id).all()}
+            raw_conn.commit()
+            logger.info(f"Companies and persons imported: {companies_count} companies, {persons_count} persons")
 
-            # OPTIMIZATION 6: Create relationships in bulk
-            logger.info("Creating company-person relationships...")
-            relationships_to_insert = []
-            existing_relationships = set()  # (company_db_id, person_db_id, role_type)
+            # Now create relationships
+            logger.info(f"Creating {len(relationships_data)} relationships...")
 
-            # Load existing relationships to avoid duplicates
-            for rel in db.query(CompanyPerson).all():
-                existing_relationships.add((rel.company_db_id, rel.person_db_id, rel.role_type))
+            # Load ID mappings
+            cursor.execute("SELECT id, company_id FROM company")
+            company_id_map = {row[1]: row[0] for row in cursor.fetchall()}
 
-            for record in all_records:
-                company_id = record.get("id")
-                company_db_id = companies_map.get(company_id)
-                if not company_db_id:
+            cursor.execute("SELECT id, person_id FROM person")
+            person_id_map = {row[1]: row[0] for row in cursor.fetchall()}
+
+            # Load existing relationships
+            cursor.execute("SELECT company_db_id, person_db_id, role_type FROM company_person")
+            existing_rels = {(row[0], row[1], row[2]) for row in cursor.fetchall()}
+
+            # Build relationship buffer
+            rel_buffer = io.StringIO()
+            rel_count = 0
+
+            for company_ext_id, person_ext_id, role_type, role_desc in relationships_data:
+                company_db_id = company_id_map.get(company_ext_id)
+                person_db_id = person_id_map.get(person_ext_id)
+
+                if not company_db_id or not person_db_id:
                     continue
 
-                related_persons = record.get("relatedPersons", {}).get("items", [])
-                for rp in related_persons:
-                    person_data = rp.get("person", {})
-                    person_id = person_data.get("id")
-                    if not person_id:
-                        continue
+                rel_key = (company_db_id, person_db_id, role_type)
+                if rel_key in existing_rels:
+                    continue
 
-                    person_db_id = persons_map.get(person_id)
-                    if not person_db_id:
-                        continue
+                existing_rels.add(rel_key)
 
-                    # Get role info
-                    roles = rp.get("roles", [])
-                    role_type = roles[0].get("type") if roles else rp.get("description")
-                    role_desc = rp.get("description")
-                    role_date = None
-                    if roles and roles[0].get("date"):
-                        try:
-                            role_date = datetime.strptime(roles[0]["date"], "%Y-%m-%d").date()
-                        except:
-                            pass
+                rel_line = "\t".join([
+                    escape_copy_value(company_db_id),
+                    escape_copy_value(person_db_id),
+                    escape_copy_value(role_type),
+                    escape_copy_value(role_desc),
+                    escape_copy_value(None),  # role_date
+                ])
+                rel_buffer.write(rel_line + "\n")
+                rel_count += 1
 
-                    # Check if relationship exists
-                    rel_key = (company_db_id, person_db_id, role_type)
-                    if rel_key not in existing_relationships:
-                        relationships_to_insert.append({
-                            "company_db_id": company_db_id,
-                            "person_db_id": person_db_id,
-                            "role_type": role_type,
-                            "role_description": role_desc,
-                            "role_date": role_date,
-                        })
-                        existing_relationships.add(rel_key)
+                # Flush periodically
+                if rel_count % 100000 == 0:
+                    rel_buffer.seek(0)
+                    cursor.copy_from(
+                        rel_buffer,
+                        'company_person',
+                        columns=('company_db_id', 'person_db_id', 'role_type', 'role_description', 'role_date')
+                    )
+                    raw_conn.commit()
+                    rel_buffer = io.StringIO()
+                    logger.info(f"Inserted {rel_count} relationships...")
 
-            # Bulk insert relationships
-            if relationships_to_insert:
-                logger.info(f"Bulk inserting {len(relationships_to_insert)} relationships...")
-                db.bulk_insert_mappings(CompanyPerson, relationships_to_insert)
-                db.commit()
+            # Final relationship flush
+            rel_buffer.seek(0)
+            rel_data = rel_buffer.getvalue()
+            if rel_data:
+                rel_buffer = io.StringIO(rel_data)
+                cursor.copy_from(
+                    rel_buffer,
+                    'company_person',
+                    columns=('company_db_id', 'person_db_id', 'role_type', 'role_description', 'role_date')
+                )
+            raw_conn.commit()
+            logger.info(f"Relationships created: {rel_count}")
 
-            # OPTIMIZATION 7: Recreate indexes
+            # Recreate indexes
             logger.info("Recreating indexes...")
-            try:
-                # Table names are singular: company, person
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_legal_name ON company (legal_name)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_raw_name ON company (raw_name)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_register_id ON company (register_id)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_person_last_name ON person (last_name)"))
-                db.execute(text("CREATE INDEX IF NOT EXISTS ix_person_first_name ON person (first_name)"))
-                db.commit()
-                logger.info("Indexes recreated successfully")
-            except Exception as e:
-                logger.warning(f"Could not recreate indexes: {e}")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_legal_name ON company (legal_name)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_raw_name ON company (raw_name)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_register_id ON company (register_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_domain ON company (domain)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_person_last_name ON person (last_name)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_person_first_name ON person (first_name)")
+            raw_conn.commit()
+            logger.info("Indexes recreated")
 
-            # Bulk index to OpenSearch
-            if os_client and os_company_batch:
-                logger.info(f"Bulk indexing {len(os_company_batch)} companies to OpenSearch...")
-                # Index in chunks of 5000
-                for i in range(0, len(os_company_batch), 5000):
-                    chunk = os_company_batch[i:i+5000]
-                    bulk_index(os_client, chunk)
-                    logger.info(f"Indexed {min(i+5000, len(os_company_batch))}/{len(os_company_batch)} companies")
-
-            # OPTIMIZATION 8: Index persons to OpenSearch more efficiently
-            if os_client:
-                logger.info("Indexing persons to OpenSearch...")
-                # Build person documents with their roles
-                person_docs = []
-
-                # Load all relationships in one query
-                all_relationships = db.query(CompanyPerson, Person, Company).join(
-                    Person, CompanyPerson.person_db_id == Person.id
-                ).join(
-                    Company, CompanyPerson.company_db_id == Company.id
-                ).all()
-
-                # Group by person
-                person_roles = defaultdict(lambda: {"person": None, "company_ids": [], "roles": []})
-                for cp, person, company in all_relationships:
-                    person_roles[person.person_id]["person"] = person
-                    person_roles[person.person_id]["company_ids"].append(company.company_id)
-                    person_roles[person.person_id]["roles"].append({
-                        "company_id": company.company_id,
-                        "company_name": company.legal_name or company.raw_name,
-                        "role_type": cp.role_type,
-                        "role_date": cp.role_date.isoformat() if cp.role_date else None
-                    })
-
-                for person_id, data in person_roles.items():
-                    person = data["person"]
-                    if not person:
-                        continue
-
-                    os_person_doc = {
-                        "person_id": person.person_id,
-                        "first_name": person.first_name,
-                        "last_name": person.last_name,
-                        "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip(),
-                        "birth_year": person.birth_year,
-                        "address_city": person.address_city,
-                        "company_ids": data["company_ids"],
-                        "roles": data["roles"],
-                    }
-                    person_docs.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
-
-                # Bulk index persons in chunks
-                for i in range(0, len(person_docs), 5000):
-                    chunk = person_docs[i:i+5000]
-                    bulk_index(os_client, chunk)
-                    logger.info(f"Indexed {min(i+5000, len(person_docs))}/{len(person_docs)} persons")
-
-                # Refresh indices to make documents searchable immediately
-                os_client.indices.refresh(index=COMPANY_INDEX)
-                os_client.indices.refresh(index=PERSON_INDEX)
-                logger.info(f"OpenSearch indexing completed: {companies_count} companies, {persons_count} persons")
+            cursor.close()
+            raw_conn.close()
 
             # Mark job as completed
             job.processed_lines = processed
@@ -532,10 +525,17 @@ def run_import_job(job_id: UUID, file_path: Path):
             job.updated_at = datetime.utcnow()
             db.commit()
 
-            logger.info(f"Import completed: {companies_count} companies, {persons_count} persons, {len(relationships_to_insert)} relationships")
+            logger.info(f"Import completed: {companies_count} companies, {persons_count} persons, {rel_count} relationships")
+            logger.info("Run POST /imports/reindex to update OpenSearch")
 
         except Exception as e:
             logger.error(f"Import failed: {e}", exc_info=True)
+            try:
+                raw_conn.rollback()
+                cursor.close()
+                raw_conn.close()
+            except:
+                pass
             job.status = "failed"
             job.error_message = str(e)
             job.updated_at = datetime.utcnow()
@@ -570,7 +570,7 @@ async def reindex_opensearch():
 
 
 def run_reindex():
-    """Run the reindex job in a background thread (sync) - OPTIMIZED VERSION."""
+    """Run the reindex job in a background thread (sync)."""
     from sqlalchemy.orm import sessionmaker
     SessionLocal = sessionmaker(bind=sync_engine)
 
@@ -586,12 +586,11 @@ def run_reindex():
         logger.info("OpenSearch indices initialized")
 
         with SessionLocal() as db:
-            # OPTIMIZATION: Use streaming/chunked queries to avoid loading everything into memory
             # Index all companies
             total_companies = db.query(Company).count()
             logger.info(f"Indexing {total_companies} companies to OpenSearch")
 
-            batch_size = 5000  # Larger batch size
+            batch_size = 5000
             os_company_batch = []
             indexed_count = 0
 
@@ -615,6 +614,9 @@ def run_reindex():
                         "address_city": company.address_city,
                         "address_postal_code": company.address_postal_code,
                         "address_country": company.address_country,
+                        "email": company.email,
+                        "website": company.website,
+                        "domain": company.domain,
                         "segment_codes_wz": segment_codes.get("wz", []),
                         "segment_codes_nace": segment_codes.get("nace", []),
                         "last_update_time": company.last_update_time.isoformat() if company.last_update_time else None,
@@ -630,9 +632,8 @@ def run_reindex():
 
             logger.info(f"Companies indexed successfully")
 
-            # OPTIMIZATION: Index persons more efficiently
-            # Load all relationships in one query to avoid N+1
-            logger.info("Loading all relationships...")
+            # Index persons
+            logger.info("Loading all relationships for person indexing...")
             all_relationships = db.query(CompanyPerson, Person, Company).join(
                 Person, CompanyPerson.person_db_id == Person.id
             ).join(
@@ -678,7 +679,7 @@ def run_reindex():
                 bulk_index(os_client, chunk)
                 logger.info(f"Indexed {min(i+5000, len(person_docs))}/{len(person_docs)} persons")
 
-            # Refresh indices to make documents searchable immediately
+            # Refresh indices
             logger.info("Refreshing indices...")
             os_client.indices.refresh(index=COMPANY_INDEX)
             os_client.indices.refresh(index=PERSON_INDEX)
