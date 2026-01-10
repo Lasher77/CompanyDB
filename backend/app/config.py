@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
+from typing import List
 
 
 class Settings(BaseSettings):
@@ -15,6 +16,9 @@ class Settings(BaseSettings):
     # Import settings
     data_directory: Path = Path(__file__).parent.parent.parent / "data"
     import_batch_size: int = 1000
+
+    # API Authentication
+    api_keys: List[str] = []  # List of valid API keys for Bearer auth
 
     class Config:
         env_file = ".env"
