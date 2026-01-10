@@ -85,8 +85,23 @@ PERSON_MAPPING = {
 }
 
 
+def clear_index_block(client: OpenSearch):
+    """Clear any index creation blocks (e.g., from disk space issues)."""
+    try:
+        client.cluster.put_settings(body={
+            "persistent": {
+                "cluster.blocks.create_index": None
+            }
+        })
+    except Exception:
+        pass  # Ignore if setting doesn't exist
+
+
 def init_opensearch_indices(client: OpenSearch):
     """Create indices if they don't exist."""
+    # Clear any index creation blocks first
+    clear_index_block(client)
+
     if not client.indices.exists(COMPANY_INDEX):
         client.indices.create(COMPANY_INDEX, body=COMPANY_MAPPING)
 
