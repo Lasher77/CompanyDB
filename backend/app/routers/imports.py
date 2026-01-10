@@ -584,10 +584,9 @@ def run_reindex_fast():
         init_opensearch_indices(os_client)
         logger.info("OpenSearch indices initialized")
 
-        # Get raw connection for efficient streaming
+        # Get raw connection - need autocommit=False for server-side cursors
         raw_conn = sync_engine.raw_connection()
-        cursor = raw_conn.cursor(name='reindex_companies')  # Server-side cursor for streaming
-        cursor.itersize = 5000  # Fetch 5000 rows at a time from server
+        raw_conn.set_session(autocommit=False)
 
         # Count companies
         count_cursor = raw_conn.cursor()
@@ -596,7 +595,9 @@ def run_reindex_fast():
         count_cursor.close()
         logger.info(f"Reindexing {total_companies} companies...")
 
-        # Stream companies using server-side cursor (no OFFSET needed)
+        # Use server-side cursor for streaming
+        cursor = raw_conn.cursor(name='reindex_companies')
+
         cursor.execute("""
             SELECT company_id, raw_name, legal_name, legal_form, status, terminated,
                    register_unique_key, register_id, address_city, address_postal_code,
@@ -604,7 +605,7 @@ def run_reindex_fast():
             FROM company
         """)
 
-        batch_size = 5000  # Reduced for memory
+        batch_size = 5000
         indexed_count = 0
 
         while True:
@@ -637,12 +638,12 @@ def run_reindex_fast():
                     }
                 })
 
-            # Bulk index and immediately free memory
+            # Bulk index
             bulk_index(os_client, os_batch)
             indexed_count += len(os_batch)
             logger.info(f"Companies: {indexed_count}/{total_companies}")
 
-            # Explicit cleanup
+            # Cleanup
             del os_batch
             del rows
             gc.collect()
@@ -651,10 +652,8 @@ def run_reindex_fast():
         gc.collect()
         logger.info("Companies indexed successfully")
 
-        # Index persons - simplified without relationship enrichment for speed
+        # Index persons
         logger.info("Indexing persons...")
-        cursor = raw_conn.cursor(name='reindex_persons')
-        cursor.itersize = 5000
 
         count_cursor = raw_conn.cursor()
         count_cursor.execute("SELECT COUNT(*) FROM person")
@@ -662,6 +661,7 @@ def run_reindex_fast():
         count_cursor.close()
         logger.info(f"Reindexing {total_persons} persons...")
 
+        cursor = raw_conn.cursor(name='reindex_persons')
         cursor.execute("""
             SELECT person_id, first_name, last_name, birth_year, address_city
             FROM person
@@ -712,6 +712,10 @@ def run_reindex_fast():
 
     except Exception as e:
         logger.error(f"Reindex failed: {e}", exc_info=True)
+        try:
+            raw_conn.close()
+        except:
+            pass
         raise
 
 
