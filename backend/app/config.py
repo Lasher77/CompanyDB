@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
+from typing import List
 
 
 class Settings(BaseSettings):
@@ -21,6 +22,9 @@ class Settings(BaseSettings):
     pg_work_mem: str = "256MB"  # Increase for larger sort operations
     pg_maintenance_work_mem: str = "512MB"  # Increase for index creation
     pg_shared_buffers: str = "2GB"  # Adjust based on available RAM
+
+    # API Authentication
+    api_keys: List[str] = []  # List of valid API keys for Bearer auth
 
     class Config:
         env_file = ".env"
