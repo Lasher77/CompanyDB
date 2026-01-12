@@ -1,10 +1,16 @@
 """
 External API for Salesforce and other integrations.
 Provides company matching/lookup with scoring.
+
+Matching Strategy:
+- Multi-stage fallback search for better recall
+- Legal form normalization (GmbH, gGmbH, AG, etc.)
+- Word-based name matching
+- Domain as fallback when name matching fails
 """
 import logging
 import re
-from typing import Optional, List
+from typing import Optional, List, Set
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, and_, func
@@ -16,6 +22,45 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["api"])
+
+# Legal form patterns for normalization
+LEGAL_FORM_PATTERNS = [
+    # Full forms first (longer patterns)
+    (r'gemeinn[üu]tzige\s+gesellschaft\s+mit\s+beschr[äa]nkter\s+haftung', ''),
+    (r'gesellschaft\s+mit\s+beschr[äa]nkter\s+haftung', ''),
+    (r'gesellschaft\s+b[üu]rgerlichen\s+rechts', ''),
+    (r'offene\s+handelsgesellschaft', ''),
+    (r'kommanditgesellschaft\s+auf\s+aktien', ''),
+    (r'aktiengesellschaft', ''),
+    (r'kommanditgesellschaft', ''),
+    (r'eingetragener\s+kaufmann', ''),
+    (r'eingetragene\s+kauffrau', ''),
+    # Abbreviations with variations
+    (r'ggmbh', ''),
+    (r'gmbh\s*&\s*co\.?\s*kg', ''),
+    (r'gmbh\s*&\s*co\.?\s*ohg', ''),
+    (r'ag\s*&\s*co\.?\s*kg', ''),
+    (r'gmbh', ''),
+    (r'mbh', ''),
+    (r'ohg', ''),
+    (r'gbr', ''),
+    (r'kgaa', ''),
+    (r'u\.?g\.?\s*\(haftungsbeschr[äa]nkt\)', ''),
+    (r'ug', ''),
+    (r'e\.?\s*k\.?', ''),
+    (r'ag', ''),
+    (r'kg', ''),
+    (r'se', ''),  # Societas Europaea
+    (r'e\.?\s*v\.?', ''),  # eingetragener Verein
+    (r'ltd\.?', ''),
+    (r'inc\.?', ''),
+    (r'corp\.?', ''),
+    (r'plc', ''),
+    (r's\.?a\.?r\.?l\.?', ''),
+    (r'b\.?v\.?', ''),
+    (r's\.?a\.?', ''),
+    (r's\.?r\.?l\.?', ''),
+]
 
 
 # Request/Response Models
@@ -96,15 +141,55 @@ async def verify_api_key(authorization: Optional[str] = Header(None)):
 
 
 # Matching helper functions
-def normalize_string(s: Optional[str]) -> str:
-    """Normalize string for comparison."""
+def normalize_company_name(s: Optional[str]) -> str:
+    """
+    Normalize company name by removing legal forms and standardizing format.
+
+    Examples:
+    - "RAL gGmbH" -> "ral"
+    - "RAL gemeinnützige GmbH" -> "ral"
+    - "Wacker Burghausen Fußball GmbH" -> "wacker burghausen fußball"
+    """
     if not s:
         return ""
-    # Lowercase, remove extra whitespace
+    # Lowercase and normalize whitespace
     s = " ".join(s.lower().split())
-    # Remove common legal form suffixes for comparison
-    s = re.sub(r'\s+(gmbh|ag|kg|ohg|gbr|ug|e\.?k\.?|mbh|co\.?\s*kg|gmbh\s*&\s*co\.?\s*kg)\.?\s*$', '', s, flags=re.IGNORECASE)
+
+    # Remove all legal form patterns
+    for pattern, replacement in LEGAL_FORM_PATTERNS:
+        s = re.sub(r'\s*' + pattern + r'\s*', replacement + ' ', s, flags=re.IGNORECASE)
+
+    # Remove punctuation at word boundaries
+    s = re.sub(r'[.,;:!?()"\'\-]+', ' ', s)
+
+    # Normalize whitespace again
+    s = " ".join(s.split())
+
     return s.strip()
+
+
+def extract_search_words(name: str) -> List[str]:
+    """
+    Extract meaningful search words from a company name.
+
+    Removes legal forms and returns individual words for fuzzy matching.
+    Filters out very short words (< 2 chars) and common filler words.
+    """
+    normalized = normalize_company_name(name)
+
+    # Split into words
+    words = normalized.split()
+
+    # Filter out short words and common fillers
+    stop_words = {'und', 'der', 'die', 'das', 'für', 'mit', 'von', 'zur', 'zum', 'den', 'dem'}
+    meaningful_words = [w for w in words if len(w) >= 2 and w not in stop_words]
+
+    return meaningful_words
+
+
+def normalize_string(s: Optional[str]) -> str:
+    """Normalize string for comparison (legacy function for backward compat)."""
+    return normalize_company_name(s)
 
 
 def extract_domain(url_or_email: Optional[str]) -> str:
@@ -131,11 +216,14 @@ def calculate_similarity(s1: str, s2: str) -> float:
     if s1 == s2:
         return 1.0
 
-    # Check if one contains the other
+    # Check if one contains the other (substring match)
     if s1 in s2 or s2 in s1:
-        return 0.8
+        # Score based on length ratio
+        shorter = min(len(s1), len(s2))
+        longer = max(len(s1), len(s2))
+        return 0.7 + (0.3 * shorter / longer)
 
-    # Simple word overlap score
+    # Word overlap score (Jaccard similarity)
     words1 = set(s1.split())
     words2 = set(s2.split())
     if not words1 or not words2:
@@ -143,7 +231,64 @@ def calculate_similarity(s1: str, s2: str) -> float:
 
     intersection = words1 & words2
     union = words1 | words2
-    return len(intersection) / len(union) if union else 0.0
+
+    if not intersection:
+        return 0.0
+
+    jaccard = len(intersection) / len(union)
+
+    # Boost score if all words from the shorter set are in the longer set
+    smaller_set = words1 if len(words1) <= len(words2) else words2
+    if smaller_set <= (words1 | words2):
+        coverage = len(intersection) / len(smaller_set)
+        # If query words are fully covered, boost the score
+        if coverage == 1.0:
+            jaccard = max(jaccard, 0.8)
+
+    return jaccard
+
+
+def calculate_name_score(query_name: str, company_name: str) -> float:
+    """
+    Calculate name match score with word-based and normalized matching.
+
+    Handles cases like:
+    - "Wacker Fußball GmbH" vs "Wacker Burghausen Fußball GmbH" -> high score
+    - "RAL gGmbH" vs "RAL gemeinnützige GmbH" -> high score
+    """
+    # Normalize both names
+    query_normalized = normalize_company_name(query_name)
+    company_normalized = normalize_company_name(company_name)
+
+    # Exact match after normalization
+    if query_normalized == company_normalized:
+        return 1.0
+
+    # Get words from both
+    query_words = set(query_normalized.split())
+    company_words = set(company_normalized.split())
+
+    if not query_words or not company_words:
+        return 0.0
+
+    # Check how many query words are in the company name
+    matched_words = query_words & company_words
+    query_coverage = len(matched_words) / len(query_words) if query_words else 0
+
+    # If all query words are found, it's a strong match
+    if query_coverage == 1.0:
+        # Score based on how specific the match is
+        company_coverage = len(matched_words) / len(company_words)
+        # All query words match, score between 0.85 and 1.0 based on specificity
+        return 0.85 + (0.15 * company_coverage)
+
+    # Partial match
+    if matched_words:
+        # At least some words match
+        return 0.5 + (0.35 * query_coverage)
+
+    # Check substring matching as fallback
+    return calculate_similarity(query_normalized, company_normalized)
 
 
 def score_company(company: Company, query: MatchQuery) -> tuple[float, dict]:
@@ -157,11 +302,10 @@ def score_company(company: Company, query: MatchQuery) -> tuple[float, dict]:
         'street': 0.1,
     }
 
-    # Name matching
+    # Name matching using improved word-based scoring
     if query.name:
-        query_name = normalize_string(query.name)
-        company_name = normalize_string(company.legal_name or company.raw_name)
-        name_score = calculate_similarity(query_name, company_name)
+        company_name = company.legal_name or company.raw_name or ""
+        name_score = calculate_name_score(query.name, company_name)
         scores['name'] = name_score
 
     # City matching
@@ -207,6 +351,63 @@ def score_company(company: Company, query: MatchQuery) -> tuple[float, dict]:
     return final_score, scores
 
 
+async def search_stage(
+    db: AsyncSession,
+    name_words: List[str],
+    city: Optional[str],
+    postal_code: Optional[str],
+    query_domain: Optional[str],
+    use_name: bool = True,
+    use_domain: bool = True,
+    limit: int = 100
+) -> List[Company]:
+    """
+    Execute a single search stage with given parameters.
+
+    Args:
+        name_words: List of words to search in company name
+        city: City to filter by
+        postal_code: Postal code prefix to filter by
+        query_domain: Domain to filter by
+        use_name: Whether to include name conditions
+        use_domain: Whether to include domain condition
+        limit: Maximum results to return
+    """
+    conditions = []
+
+    # Name word matching - each word must appear somewhere
+    if use_name and name_words:
+        name_conditions = []
+        for word in name_words:
+            word_pattern = f"%{word}%"
+            name_conditions.append(
+                or_(
+                    Company.raw_name.ilike(word_pattern),
+                    Company.legal_name.ilike(word_pattern)
+                )
+            )
+        # All words must match (AND logic for words)
+        conditions.extend(name_conditions)
+
+    # Location filters
+    if city:
+        conditions.append(Company.address_city.ilike(f"%{city}%"))
+
+    if postal_code:
+        conditions.append(Company.address_postal_code.ilike(f"{postal_code}%"))
+
+    # Domain filter
+    if use_domain and query_domain:
+        conditions.append(Company.domain == query_domain)
+
+    if not conditions:
+        return []
+
+    db_query = select(Company).where(and_(*conditions)).limit(limit)
+    result = await db.execute(db_query)
+    return list(result.scalars().all())
+
+
 @router.post("/match", response_model=MatchResponse)
 async def match_companies(
     request: MatchRequest,
@@ -216,55 +417,76 @@ async def match_companies(
     """
     Find matching companies based on provided criteria.
 
+    Uses a multi-stage fallback strategy:
+    - Stage 1: Name words + City + PLZ + Domain (strictest)
+    - Stage 2: Name words + City + PLZ (without domain)
+    - Stage 3: Domain + City + PLZ (without name - domain as primary identifier)
+
     Returns companies sorted by match score with detailed scoring breakdown.
     """
     query = request.query
     options = request.options or MatchOptions()
 
-    # Build database query
-    db_query = select(Company)
-    conditions = []
+    # Validate at least one search criterion
+    has_name = bool(query.name)
+    has_location = bool(query.city or query.postal_code)
+    query_domain = extract_domain(query.domain) or extract_domain(query.email)
+    has_domain = bool(query_domain)
 
-    # Name search (required as primary filter when provided)
-    if query.name:
-        search_term = f"%{query.name}%"
-        conditions.append(
-            or_(
-                Company.raw_name.ilike(search_term),
-                Company.legal_name.ilike(search_term)
-            )
-        )
-
-    # City filter
-    if query.city:
-        conditions.append(Company.address_city.ilike(f"%{query.city}%"))
-
-    # Postal code filter
-    if query.postal_code:
-        conditions.append(Company.address_postal_code.ilike(f"{query.postal_code}%"))
-
-    # Domain filter (from website or email)
-    if query.domain or query.email:
-        query_domain = extract_domain(query.domain) or extract_domain(query.email)
-        if query_domain:
-            conditions.append(Company.domain == query_domain)
-
-    if not conditions:
+    if not has_name and not has_location and not has_domain:
         raise HTTPException(
             status_code=400,
             detail="At least one search criterion (name, city, postal_code, domain, or email) is required"
         )
 
-    # Use AND logic: all provided criteria must match
-    db_query = db_query.where(and_(*conditions))
-    db_query = db_query.limit(100)  # Fetch more to filter by score later
+    # Extract search words from name
+    name_words = extract_search_words(query.name) if query.name else []
 
-    result = await db.execute(db_query)
-    companies = result.scalars().all()
+    # Track seen company IDs to avoid duplicates across stages
+    seen_ids: Set[str] = set()
+    all_companies: List[Company] = []
+
+    # Stage 1: Name + City + PLZ + Domain (strictest match)
+    if name_words and has_domain:
+        logger.debug("Stage 1: Name words + Location + Domain")
+        stage1_results = await search_stage(
+            db, name_words, query.city, query.postal_code, query_domain,
+            use_name=True, use_domain=True
+        )
+        for c in stage1_results:
+            if c.company_id not in seen_ids:
+                seen_ids.add(c.company_id)
+                all_companies.append(c)
+
+    # Stage 2: Name + City + PLZ (without domain)
+    if name_words:
+        logger.debug("Stage 2: Name words + Location (no domain)")
+        stage2_results = await search_stage(
+            db, name_words, query.city, query.postal_code, query_domain,
+            use_name=True, use_domain=False
+        )
+        for c in stage2_results:
+            if c.company_id not in seen_ids:
+                seen_ids.add(c.company_id)
+                all_companies.append(c)
+
+    # Stage 3: Domain + City + PLZ (domain as primary identifier, no name)
+    if has_domain and (not name_words or len(all_companies) < 5):
+        logger.debug("Stage 3: Domain + Location (no name)")
+        stage3_results = await search_stage(
+            db, [], query.city, query.postal_code, query_domain,
+            use_name=False, use_domain=True
+        )
+        for c in stage3_results:
+            if c.company_id not in seen_ids:
+                seen_ids.add(c.company_id)
+                all_companies.append(c)
+
+    logger.info(f"Found {len(all_companies)} companies across all search stages")
 
     # Score and rank results
     scored_results = []
-    for company in companies:
+    for company in all_companies:
         score, match_details = score_company(company, query)
         if score >= options.min_score:
             scored_results.append(MatchedCompany(

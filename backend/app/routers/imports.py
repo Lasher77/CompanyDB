@@ -218,40 +218,51 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
         db.commit()
 
         try:
-            # Get raw psycopg2 connection for COPY
-            raw_conn = sync_engine.raw_connection()
-            cursor = raw_conn.cursor()
+            # Initialize OpenSearch if enabled
+            if settings.opensearch_enabled:
+                try:
+                    from ..opensearch_client import get_opensearch_client, init_opensearch_indices
+                    os_client = get_opensearch_client()
+                    init_opensearch_indices(os_client)
+                    logger.info("OpenSearch initialized successfully")
+                except Exception as e:
+                    logger.warning(f"OpenSearch not available, skipping indexing: {e}")
+                    os_client = None
 
-            # Disable indexes for faster import
-            logger.info("Disabling indexes for faster import...")
-            cursor.execute("DROP INDEX IF EXISTS ix_company_legal_name")
-            cursor.execute("DROP INDEX IF EXISTS ix_company_raw_name")
-            cursor.execute("DROP INDEX IF EXISTS ix_company_register_id")
-            cursor.execute("DROP INDEX IF EXISTS ix_company_domain")
-            cursor.execute("DROP INDEX IF EXISTS ix_person_last_name")
-            cursor.execute("DROP INDEX IF EXISTS ix_person_first_name")
-            raw_conn.commit()
+            # OPTIMIZATION 1: Disable auto-commit and use larger batches
+            batch_size = 5000  # Increased from 1000
 
-            # Load existing IDs to check for duplicates
-            logger.info("Loading existing company IDs...")
-            cursor.execute("SELECT company_id FROM company")
-            existing_company_ids = {row[0] for row in cursor.fetchall()}
-            logger.info(f"Found {len(existing_company_ids)} existing companies")
+            # OPTIMIZATION 2: Load existing companies and persons into memory to avoid N+1 queries
+            logger.info("Loading existing companies and persons into memory...")
+            existing_companies = {c.company_id: c for c in db.query(Company).all()}
+            existing_persons = {p.person_id: p for p in db.query(Person).all()}
+            logger.info(f"Loaded {len(existing_companies)} existing companies, {len(existing_persons)} existing persons")
 
-            cursor.execute("SELECT person_id FROM person")
-            existing_person_ids = {row[0] for row in cursor.fetchall()}
-            logger.info(f"Found {len(existing_person_ids)} existing persons")
+            # OPTIMIZATION 3: Disable indexes during import for PostgreSQL performance
+            logger.info("Disabling non-essential indexes for faster import...")
+            try:
+                # Drop indexes that can be recreated (keep primary keys and unique constraints)
+                # Table names are singular: company, person
+                db.execute(text("DROP INDEX IF EXISTS ix_company_legal_name"))
+                db.execute(text("DROP INDEX IF EXISTS ix_company_raw_name"))
+                db.execute(text("DROP INDEX IF EXISTS ix_company_register_id"))
+                db.execute(text("DROP INDEX IF EXISTS ix_person_last_name"))
+                db.execute(text("DROP INDEX IF EXISTS ix_person_first_name"))
+                db.commit()
+                logger.info("Indexes dropped successfully")
+            except Exception as e:
+                logger.warning(f"Could not drop indexes: {e}")
 
-            # Prepare COPY buffers
-            company_buffer = io.StringIO()
-            person_buffer = io.StringIO()
+            # Prepare batch collections
+            companies_to_insert = []
+            companies_to_update = []
+            persons_to_insert = []
+            os_company_batch = []
 
-            # Track new persons to avoid duplicates within import
-            new_person_ids: Set[str] = set()
+            # For relationships - store records to process later
+            all_records = []
 
-            # For relationships - store minimal data
-            relationships_data = []  # List of (company_id, person_id, role_type, role_desc)
-
+            # Tracking
             processed = 0
             companies_count = 0
             persons_count = 0
@@ -505,17 +516,79 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
 
             # Recreate indexes
             logger.info("Recreating indexes...")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_legal_name ON company (legal_name)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_raw_name ON company (raw_name)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_register_id ON company (register_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_company_domain ON company (domain)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_person_last_name ON person (last_name)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_person_first_name ON person (first_name)")
-            raw_conn.commit()
-            logger.info("Indexes recreated")
+            try:
+                # Table names are singular: company, person
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_legal_name ON company (legal_name)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_raw_name ON company (raw_name)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_company_register_id ON company (register_id)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_person_last_name ON person (last_name)"))
+                db.execute(text("CREATE INDEX IF NOT EXISTS ix_person_first_name ON person (first_name)"))
+                db.commit()
+                logger.info("Indexes recreated successfully")
+            except Exception as e:
+                logger.warning(f"Could not recreate indexes: {e}")
 
-            cursor.close()
-            raw_conn.close()
+            # Bulk index to OpenSearch
+            if os_client and os_company_batch:
+                logger.info(f"Bulk indexing {len(os_company_batch)} companies to OpenSearch...")
+                # Index in chunks of 5000
+                for i in range(0, len(os_company_batch), 5000):
+                    chunk = os_company_batch[i:i+5000]
+                    bulk_index(os_client, chunk)
+                    logger.info(f"Indexed {min(i+5000, len(os_company_batch))}/{len(os_company_batch)} companies")
+
+            # OPTIMIZATION 8: Index persons to OpenSearch more efficiently
+            if os_client:
+                logger.info("Indexing persons to OpenSearch...")
+                # Build person documents with their roles
+                person_docs = []
+
+                # Load all relationships in one query
+                all_relationships = db.query(CompanyPerson, Person, Company).join(
+                    Person, CompanyPerson.person_db_id == Person.id
+                ).join(
+                    Company, CompanyPerson.company_db_id == Company.id
+                ).all()
+
+                # Group by person
+                person_roles = defaultdict(lambda: {"person": None, "company_ids": [], "roles": []})
+                for cp, person, company in all_relationships:
+                    person_roles[person.person_id]["person"] = person
+                    person_roles[person.person_id]["company_ids"].append(company.company_id)
+                    person_roles[person.person_id]["roles"].append({
+                        "company_id": company.company_id,
+                        "company_name": company.legal_name or company.raw_name,
+                        "role_type": cp.role_type,
+                        "role_date": cp.role_date.isoformat() if cp.role_date else None
+                    })
+
+                for person_id, data in person_roles.items():
+                    person = data["person"]
+                    if not person:
+                        continue
+
+                    os_person_doc = {
+                        "person_id": person.person_id,
+                        "first_name": person.first_name,
+                        "last_name": person.last_name,
+                        "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip(),
+                        "birth_year": person.birth_year,
+                        "address_city": person.address_city,
+                        "company_ids": data["company_ids"],
+                        "roles": data["roles"],
+                    }
+                    person_docs.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
+
+                # Bulk index persons in chunks
+                for i in range(0, len(person_docs), 5000):
+                    chunk = person_docs[i:i+5000]
+                    bulk_index(os_client, chunk)
+                    logger.info(f"Indexed {min(i+5000, len(person_docs))}/{len(person_docs)} persons")
+
+                # Refresh indices to make documents searchable immediately
+                os_client.indices.refresh(index=COMPANY_INDEX)
+                os_client.indices.refresh(index=PERSON_INDEX)
+                logger.info(f"OpenSearch indexing completed: {companies_count} companies, {persons_count} persons")
 
             # Mark job as completed
             job.processed_lines = processed
