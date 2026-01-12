@@ -20,10 +20,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS for frontend
+# CORS for frontend and API tester
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],  # Allow all origins for API testing
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
