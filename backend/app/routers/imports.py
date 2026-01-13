@@ -181,6 +181,30 @@ async def list_import_jobs(db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
+@router.delete("/{job_id}")
+async def cancel_import_job(job_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Cancel/delete an import job. Use this to stop stuck imports."""
+    result = await db.execute(select(ImportJob).where(ImportJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Import job not found")
+
+    old_status = job.status
+
+    # Mark as cancelled or delete
+    if job.status in ("pending", "running"):
+        job.status = "cancelled"
+        job.error_message = "Cancelled by user"
+        job.updated_at = datetime.utcnow()
+        await db.commit()
+        return {"message": f"Job {job_id} cancelled (was {old_status})"}
+    else:
+        # Job already completed/failed - delete it
+        await db.delete(job)
+        await db.commit()
+        return {"message": f"Job {job_id} deleted (was {old_status})"}
+
+
 def escape_copy_value(value) -> str:
     """Escape a value for PostgreSQL COPY format."""
     if value is None:
@@ -211,6 +235,16 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
     with SessionLocal() as db:
         job = db.query(ImportJob).filter(ImportJob.id == job_id).first()
         if not job:
+            return
+
+        # Check if job was cancelled before starting
+        if job.status == "cancelled":
+            logger.info(f"Import job {job_id} was cancelled, skipping")
+            return
+
+        # Don't restart completed or failed jobs
+        if job.status in ("completed", "failed"):
+            logger.info(f"Import job {job_id} already {job.status}, skipping")
             return
 
         job.status = "running"
