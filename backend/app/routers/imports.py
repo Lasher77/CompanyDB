@@ -144,8 +144,22 @@ async def create_import_job(
     if not job.filename.endswith(".jsonl"):
         raise HTTPException(status_code=400, detail="Only .jsonl files are supported")
 
-    # Count total lines (for progress tracking)
-    total_lines = sum(1 for _ in open(file_path, "r", encoding="utf-8"))
+    # Count total lines (for progress tracking) with error handling
+    total_lines = 0
+    try:
+        # Use binary mode for faster counting, then decode
+        with open(file_path, "rb") as f:
+            total_lines = sum(1 for _ in f)
+        logger.info(f"Counted {total_lines} lines in {job.filename}")
+    except Exception as e:
+        logger.error(f"Error counting lines in {job.filename}: {e}")
+        # Estimate based on file size (assume ~500 bytes per line average)
+        try:
+            file_size = file_path.stat().st_size
+            total_lines = max(1, file_size // 500)
+            logger.info(f"Estimated {total_lines} lines based on file size {file_size}")
+        except:
+            total_lines = 1  # Fallback
 
     # Create import job record
     import_job = ImportJob(
