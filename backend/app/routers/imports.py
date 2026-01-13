@@ -227,10 +227,14 @@ def escape_copy_value(value) -> str:
 def run_import_job_fast(job_id: UUID, file_path: Path):
     """Ultra-fast import using PostgreSQL COPY and streaming."""
     from sqlalchemy.orm import sessionmaker
-    from sqlalchemy import create_engine
-    import psycopg2
 
     SessionLocal = sessionmaker(bind=sync_engine)
+    COMPANY_INDEX = "companies"
+    PERSON_INDEX = "persons"
+
+    # Initialize variables for cleanup in except block
+    raw_conn = None
+    cursor = None
 
     with SessionLocal() as db:
         job = db.query(ImportJob).filter(ImportJob.id == job_id).first()
@@ -253,6 +257,7 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
 
         try:
             # Initialize OpenSearch if enabled
+            os_client = None
             if settings.opensearch_enabled:
                 try:
                     from ..opensearch_client import get_opensearch_client, init_opensearch_indices
@@ -263,38 +268,70 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                     logger.warning(f"OpenSearch not available, skipping indexing: {e}")
                     os_client = None
 
-            # OPTIMIZATION 1: Disable auto-commit and use larger batches
-            batch_size = 5000  # Increased from 1000
+            # Get raw PostgreSQL connection for COPY
+            raw_conn = sync_engine.raw_connection()
+            cursor = raw_conn.cursor()
 
-            # OPTIMIZATION 2: Load existing companies and persons into memory to avoid N+1 queries
-            logger.info("Loading existing companies and persons into memory...")
-            existing_companies = {c.company_id: c for c in db.query(Company).all()}
-            existing_persons = {p.person_id: p for p in db.query(Person).all()}
-            logger.info(f"Loaded {len(existing_companies)} existing companies, {len(existing_persons)} existing persons")
+            # SMART LOADING: For small files, only load IDs from the file first
+            # For large files, load all existing IDs
+            SMALL_FILE_THRESHOLD = 10000
 
-            # OPTIMIZATION 3: Disable indexes during import for PostgreSQL performance
-            logger.info("Disabling non-essential indexes for faster import...")
-            try:
-                # Drop indexes that can be recreated (keep primary keys and unique constraints)
-                # Table names are singular: company, person
-                db.execute(text("DROP INDEX IF EXISTS ix_company_legal_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_company_raw_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_company_register_id"))
-                db.execute(text("DROP INDEX IF EXISTS ix_person_last_name"))
-                db.execute(text("DROP INDEX IF EXISTS ix_person_first_name"))
-                db.commit()
-                logger.info("Indexes dropped successfully")
-            except Exception as e:
-                logger.warning(f"Could not drop indexes: {e}")
+            if job.total_lines < SMALL_FILE_THRESHOLD:
+                # SMALL FILE: Extract IDs from file, then query only those
+                logger.info(f"Small file ({job.total_lines} lines) - using targeted ID loading")
+                file_company_ids = set()
+                file_person_ids = set()
 
-            # Prepare batch collections
-            companies_to_insert = []
-            companies_to_update = []
-            persons_to_insert = []
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json_loads(line)
+                            if record.get("id"):
+                                file_company_ids.add(record["id"])
+                            for rp in record.get("relatedPersons", {}).get("items", []):
+                                person_data = rp.get("person", {})
+                                if person_data.get("id"):
+                                    file_person_ids.add(person_data["id"])
+                        except:
+                            continue
+
+                logger.info(f"Found {len(file_company_ids)} companies, {len(file_person_ids)} persons in file")
+
+                # Query only relevant IDs
+                existing_company_ids = set()
+                existing_person_ids = set()
+
+                if file_company_ids:
+                    placeholders = ','.join(['%s'] * len(file_company_ids))
+                    cursor.execute(f"SELECT company_id FROM company WHERE company_id IN ({placeholders})", tuple(file_company_ids))
+                    existing_company_ids = {row[0] for row in cursor.fetchall()}
+
+                if file_person_ids:
+                    placeholders = ','.join(['%s'] * len(file_person_ids))
+                    cursor.execute(f"SELECT person_id FROM person WHERE person_id IN ({placeholders})", tuple(file_person_ids))
+                    existing_person_ids = {row[0] for row in cursor.fetchall()}
+
+                logger.info(f"Found {len(existing_company_ids)} existing companies, {len(existing_person_ids)} existing persons")
+            else:
+                # LARGE FILE: Load all existing IDs (faster for bulk operations)
+                logger.info(f"Large file ({job.total_lines} lines) - loading all existing IDs")
+                cursor.execute("SELECT company_id FROM company")
+                existing_company_ids = {row[0] for row in cursor.fetchall()}
+
+                cursor.execute("SELECT person_id FROM person")
+                existing_person_ids = {row[0] for row in cursor.fetchall()}
+
+                logger.info(f"Loaded {len(existing_company_ids)} existing companies, {len(existing_person_ids)} existing persons")
+
+            # Initialize buffers and tracking
+            company_buffer = io.StringIO()
+            person_buffer = io.StringIO()
+            new_person_ids = set()
+            relationships_data = []
             os_company_batch = []
-
-            # For relationships - store records to process later
-            all_records = []
 
             # Tracking
             processed = 0
@@ -624,6 +661,13 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                 os_client.indices.refresh(index=PERSON_INDEX)
                 logger.info(f"OpenSearch indexing completed: {companies_count} companies, {persons_count} persons")
 
+            # Close PostgreSQL connection
+            try:
+                cursor.close()
+                raw_conn.close()
+            except:
+                pass
+
             # Mark job as completed
             job.processed_lines = processed
             job.companies_imported = companies_count
@@ -638,9 +682,12 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
         except Exception as e:
             logger.error(f"Import failed: {e}", exc_info=True)
             try:
-                raw_conn.rollback()
-                cursor.close()
-                raw_conn.close()
+                if raw_conn:
+                    raw_conn.rollback()
+                if cursor:
+                    cursor.close()
+                if raw_conn:
+                    raw_conn.close()
             except:
                 pass
             job.status = "failed"
