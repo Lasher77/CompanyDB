@@ -608,58 +608,13 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                     bulk_index(os_client, chunk)
                     logger.info(f"Indexed {min(i+5000, len(os_company_batch))}/{len(os_company_batch)} companies")
 
-            # OPTIMIZATION 8: Index persons to OpenSearch more efficiently
+            # Skip expensive person indexing for small imports - use reindex instead
+            # The old code loaded ALL relationships into memory which caused 40GB+ memory usage
             if os_client:
-                logger.info("Indexing persons to OpenSearch...")
-                # Build person documents with their roles
-                person_docs = []
-
-                # Load all relationships in one query
-                all_relationships = db.query(CompanyPerson, Person, Company).join(
-                    Person, CompanyPerson.person_db_id == Person.id
-                ).join(
-                    Company, CompanyPerson.company_db_id == Company.id
-                ).all()
-
-                # Group by person
-                person_roles = defaultdict(lambda: {"person": None, "company_ids": [], "roles": []})
-                for cp, person, company in all_relationships:
-                    person_roles[person.person_id]["person"] = person
-                    person_roles[person.person_id]["company_ids"].append(company.company_id)
-                    person_roles[person.person_id]["roles"].append({
-                        "company_id": company.company_id,
-                        "company_name": company.legal_name or company.raw_name,
-                        "role_type": cp.role_type,
-                        "role_date": cp.role_date.isoformat() if cp.role_date else None
-                    })
-
-                for person_id, data in person_roles.items():
-                    person = data["person"]
-                    if not person:
-                        continue
-
-                    os_person_doc = {
-                        "person_id": person.person_id,
-                        "first_name": person.first_name,
-                        "last_name": person.last_name,
-                        "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip(),
-                        "birth_year": person.birth_year,
-                        "address_city": person.address_city,
-                        "company_ids": data["company_ids"],
-                        "roles": data["roles"],
-                    }
-                    person_docs.append({"_index": PERSON_INDEX, "_id": person.person_id, "_source": os_person_doc})
-
-                # Bulk index persons in chunks
-                for i in range(0, len(person_docs), 5000):
-                    chunk = person_docs[i:i+5000]
-                    bulk_index(os_client, chunk)
-                    logger.info(f"Indexed {min(i+5000, len(person_docs))}/{len(person_docs)} persons")
-
-                # Refresh indices to make documents searchable immediately
+                logger.info("Skipping person OpenSearch indexing during import (use /imports/reindex instead)")
+                # Refresh company index only
                 os_client.indices.refresh(index=COMPANY_INDEX)
-                os_client.indices.refresh(index=PERSON_INDEX)
-                logger.info(f"OpenSearch indexing completed: {companies_count} companies, {persons_count} persons")
+                logger.info(f"OpenSearch company indexing completed: {companies_count} companies")
 
             # Close PostgreSQL connection
             try:
