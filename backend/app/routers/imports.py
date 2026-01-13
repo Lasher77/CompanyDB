@@ -290,12 +290,14 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                         try:
                             record = json_loads(line)
                             if record.get("id"):
-                                file_company_ids.add(record["id"])
+                                # Convert to string for consistent comparison
+                                file_company_ids.add(str(record["id"]))
                             for rp in record.get("relatedPersons", {}).get("items", []):
                                 person_data = rp.get("person", {})
                                 if person_data.get("id"):
-                                    file_person_ids.add(person_data["id"])
-                        except:
+                                    file_person_ids.add(str(person_data["id"]))
+                        except Exception as e:
+                            logger.warning(f"Error extracting IDs: {e}")
                             continue
 
                 logger.info(f"Found {len(file_company_ids)} companies, {len(file_person_ids)} persons in file")
@@ -350,19 +352,26 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
 
                     try:
                         record = json_loads(line)
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"JSON parse error at line {processed}: {e}")
                         processed += 1
                         continue
 
                     company_id = record.get("id", "")
 
-                    # Skip if company already exists
-                    if company_id in existing_company_ids:
+                    # Debug: Log first few companies
+                    if processed < 3:
+                        logger.info(f"Processing company_id={company_id} (type={type(company_id).__name__})")
+                        logger.info(f"existing_company_ids sample: {list(existing_company_ids)[:3]} (types: {[type(x).__name__ for x in list(existing_company_ids)[:3]]})")
+
+                    # Skip if company already exists - convert to string for comparison
+                    company_id_str = str(company_id)
+                    if company_id_str in existing_company_ids:
                         processed += 1
                         continue
 
                     # Mark as existing to avoid duplicates in this import
-                    existing_company_ids.add(company_id)
+                    existing_company_ids.add(company_id_str)
 
                     # Extract fields
                     name_obj = record.get("name", {})
