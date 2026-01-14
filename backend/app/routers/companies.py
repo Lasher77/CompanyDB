@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func, Integer, Float
+from sqlalchemy import select, or_, func, Integer, Float, text, literal_column
 from typing import Optional
 from ..database import get_db
 from ..models import Company, Person, CompanyPerson
@@ -175,10 +175,10 @@ async def search_companies_postgres(
 
     # Filter by employee count from JSONB full_record -> financials -> items
     if employee_min is not None or employee_max is not None:
-        # JSONB path to extract employee count: financials.items where id='Employees'
+        # Extract employee count using jsonb_path_query_first with proper jsonpath cast
         employee_expr = func.jsonb_path_query_first(
             Company.full_record,
-            '$.financials.items[*] ? (@.id == "Employees").value'
+            literal_column("'$.financials.items[*] ? (@.id == \"Employees\").value'::jsonpath")
         ).cast(Integer)
         if employee_min is not None:
             query = query.where(employee_expr >= employee_min)
@@ -187,10 +187,10 @@ async def search_companies_postgres(
 
     # Filter by revenue from JSONB full_record -> financials -> items
     if revenue_min is not None or revenue_max is not None:
-        # JSONB path to extract revenue: financials.items where id='Revenue'
+        # Extract revenue using jsonb_path_query_first with proper jsonpath cast
         revenue_expr = func.jsonb_path_query_first(
             Company.full_record,
-            '$.financials.items[*] ? (@.id == "Revenue").value'
+            literal_column("'$.financials.items[*] ? (@.id == \"Revenue\").value'::jsonpath")
         ).cast(Float)
         if revenue_min is not None:
             query = query.where(revenue_expr >= revenue_min)
