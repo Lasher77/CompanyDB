@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, Integer, Float
 from typing import Optional
 from ..database import get_db
 from ..models import Company, Person, CompanyPerson
@@ -37,6 +37,7 @@ async def search_companies_opensearch(
     status: Optional[str],
     legal_form: Optional[str],
     city: Optional[str],
+    postal_code: Optional[str],
     limit: int,
     offset: int
 ) -> tuple[list[dict], int]:
@@ -88,6 +89,11 @@ async def search_companies_opensearch(
             "wildcard": {"address_city": f"*{city}*"}
         })
 
+    if postal_code:
+        filter_clauses.append({
+            "prefix": {"address_postal_code": postal_code}
+        })
+
     query_body = {
         "query": {
             "bool": {
@@ -132,6 +138,11 @@ async def search_companies_postgres(
     status: Optional[str],
     legal_form: Optional[str],
     city: Optional[str],
+    postal_code: Optional[str],
+    employee_min: Optional[int],
+    employee_max: Optional[int],
+    revenue_min: Optional[float],
+    revenue_max: Optional[float],
     limit: int,
     offset: int
 ) -> tuple[list[Company], int]:
@@ -159,6 +170,33 @@ async def search_companies_postgres(
     if city:
         query = query.where(Company.address_city.ilike(f"%{city}%"))
 
+    if postal_code:
+        query = query.where(Company.address_postal_code.ilike(f"{postal_code}%"))
+
+    # Filter by employee count from JSONB full_record -> financials -> items
+    if employee_min is not None or employee_max is not None:
+        # JSONB path to extract employee count: financials.items where id='Employees'
+        employee_expr = func.jsonb_path_query_first(
+            Company.full_record,
+            '$.financials.items[*] ? (@.id == "Employees").value'
+        ).cast(Integer)
+        if employee_min is not None:
+            query = query.where(employee_expr >= employee_min)
+        if employee_max is not None:
+            query = query.where(employee_expr <= employee_max)
+
+    # Filter by revenue from JSONB full_record -> financials -> items
+    if revenue_min is not None or revenue_max is not None:
+        # JSONB path to extract revenue: financials.items where id='Revenue'
+        revenue_expr = func.jsonb_path_query_first(
+            Company.full_record,
+            '$.financials.items[*] ? (@.id == "Revenue").value'
+        ).cast(Float)
+        if revenue_min is not None:
+            query = query.where(revenue_expr >= revenue_min)
+        if revenue_max is not None:
+            query = query.where(revenue_expr <= revenue_max)
+
     # Get total count
     count_query = select(func.count()).select_from(query.subquery())
     total_result = await db.execute(count_query)
@@ -179,19 +217,30 @@ async def search_companies(
     status: Optional[str] = Query(None, description="Filter by status (active/terminated/liquidation)"),
     legal_form: Optional[str] = Query(None, description="Filter by legal form"),
     city: Optional[str] = Query(None, description="Filter by city"),
+    postal_code: Optional[str] = Query(None, description="Filter by postal code (prefix match)"),
+    employee_min: Optional[int] = Query(None, ge=0, description="Minimum employee count"),
+    employee_max: Optional[int] = Query(None, ge=0, description="Maximum employee count"),
+    revenue_min: Optional[float] = Query(None, ge=0, description="Minimum revenue in EUR"),
+    revenue_max: Optional[float] = Query(None, ge=0, description="Maximum revenue in EUR"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db)
 ):
     """Search companies with optional filters. Uses OpenSearch if available, PostgreSQL as fallback."""
 
-    # Try OpenSearch first
-    os_client = get_opensearch_client()
+    # Employee/revenue filters require PostgreSQL (JSONB query), skip OpenSearch
+    use_postgres_for_jsonb = (
+        employee_min is not None or employee_max is not None or
+        revenue_min is not None or revenue_max is not None
+    )
+
+    # Try OpenSearch first (unless we need JSONB filters)
+    os_client = get_opensearch_client() if not use_postgres_for_jsonb else None
 
     if os_client and q:  # Only use OpenSearch for text search
         try:
             items, total = await search_companies_opensearch(
-                os_client, q, status, legal_form, city, limit, offset
+                os_client, q, status, legal_form, city, postal_code, limit, offset
             )
             logger.debug(f"OpenSearch search returned {len(items)} results")
 
@@ -233,7 +282,9 @@ async def search_companies(
 
     # Fallback to PostgreSQL
     companies, total = await search_companies_postgres(
-        db, q, status, legal_form, city, limit, offset
+        db, q, status, legal_form, city, postal_code,
+        employee_min, employee_max, revenue_min, revenue_max,
+        limit, offset
     )
 
     return CompanyListResponse(

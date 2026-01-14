@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, Building2, User, MapPin, FileText, ChevronRight } from 'lucide-react'
+import { Search, Building2, User, MapPin, FileText, ChevronRight, Filter, ChevronDown, X, Users, Euro } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -13,16 +13,38 @@ import type { CompanyListItem, PersonListItem } from '@/types'
 
 type SearchType = 'companies' | 'persons'
 
+interface Filters {
+  city: string
+  postalCode: string
+  employeeMin: string
+  employeeMax: string
+  revenueMin: string
+  revenueMax: string
+}
+
+const defaultFilters: Filters = {
+  city: '',
+  postalCode: '',
+  employeeMin: '',
+  employeeMax: '',
+  revenueMin: '',
+  revenueMax: '',
+}
+
 export function SearchPage() {
   const navigate = useNavigate()
   const [searchType, setSearchType] = useState<SearchType>('companies')
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('')
+  const [filters, setFilters] = useState<Filters>(defaultFilters)
+  const [showFilters, setShowFilters] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [companies, setCompanies] = useState<CompanyListItem[]>([])
   const [persons, setPersons] = useState<PersonListItem[]>([])
   const [total, setTotal] = useState(0)
   const [hasSearched, setHasSearched] = useState(false)
+
+  const activeFilterCount = Object.values(filters).filter(v => v !== '').length
 
   const handleSearch = useCallback(async () => {
     if (!query.trim()) return
@@ -35,6 +57,12 @@ export function SearchPage() {
         const result = await companiesApi.search({
           q: query,
           status: statusFilter || undefined,
+          city: filters.city || undefined,
+          postal_code: filters.postalCode || undefined,
+          employee_min: filters.employeeMin ? parseInt(filters.employeeMin) : undefined,
+          employee_max: filters.employeeMax ? parseInt(filters.employeeMax) : undefined,
+          revenue_min: filters.revenueMin ? parseFloat(filters.revenueMin) : undefined,
+          revenue_max: filters.revenueMax ? parseFloat(filters.revenueMax) : undefined,
           limit: 20,
         })
         setCompanies(result.items)
@@ -43,6 +71,7 @@ export function SearchPage() {
       } else {
         const result = await personsApi.search({
           q: query,
+          city: filters.city || undefined,
           limit: 20,
         })
         setPersons(result.items)
@@ -54,7 +83,15 @@ export function SearchPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [query, searchType, statusFilter])
+  }, [query, searchType, statusFilter, filters])
+
+  const clearFilters = () => {
+    setFilters(defaultFilters)
+  }
+
+  const updateFilter = (key: keyof Filters, value: string) => {
+    setFilters(prev => ({ ...prev, [key]: value }))
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -129,7 +166,141 @@ export function SearchPage() {
             </Button>
           </div>
 
-          {/* Filters (only for companies) */}
+          {/* Filter Toggle Button */}
+          {searchType === 'companies' && (
+            <div className="mt-4">
+              <button
+                onClick={() => setShowFilters(!showFilters)}
+                className={cn(
+                  'flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors',
+                  showFilters || activeFilterCount > 0
+                    ? 'bg-blue-100 text-blue-700'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                )}
+              >
+                <Filter className="h-4 w-4" />
+                Filter
+                {activeFilterCount > 0 && (
+                  <Badge className="ml-1 bg-blue-600 text-white text-xs px-1.5 py-0.5">
+                    {activeFilterCount}
+                  </Badge>
+                )}
+                <ChevronDown className={cn(
+                  'h-4 w-4 transition-transform',
+                  showFilters && 'rotate-180'
+                )} />
+              </button>
+            </div>
+          )}
+
+          {/* Advanced Filters Panel */}
+          <AnimatePresence>
+            {showFilters && searchType === 'companies' && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-medium text-gray-700">Erweiterte Filter</h3>
+                    {activeFilterCount > 0 && (
+                      <button
+                        onClick={clearFilters}
+                        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
+                      >
+                        <X className="h-3 w-3" />
+                        Filter zurücksetzen
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Location Filters */}
+                    <div className="space-y-3">
+                      <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center gap-1">
+                        <MapPin className="h-3 w-3" />
+                        Standort
+                      </h4>
+                      <div className="space-y-2">
+                        <Input
+                          type="text"
+                          placeholder="Stadt"
+                          value={filters.city}
+                          onChange={(e) => updateFilter('city', e.target.value)}
+                          className="h-9 text-sm"
+                        />
+                        <Input
+                          type="text"
+                          placeholder="Postleitzahl"
+                          value={filters.postalCode}
+                          onChange={(e) => updateFilter('postalCode', e.target.value)}
+                          className="h-9 text-sm"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Employee Filter */}
+                    <div className="space-y-3">
+                      <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center gap-1">
+                        <Users className="h-3 w-3" />
+                        Mitarbeiter
+                      </h4>
+                      <div className="flex gap-2">
+                        <Input
+                          type="number"
+                          placeholder="Min"
+                          min="0"
+                          value={filters.employeeMin}
+                          onChange={(e) => updateFilter('employeeMin', e.target.value)}
+                          className="h-9 text-sm"
+                        />
+                        <span className="flex items-center text-gray-400">-</span>
+                        <Input
+                          type="number"
+                          placeholder="Max"
+                          min="0"
+                          value={filters.employeeMax}
+                          onChange={(e) => updateFilter('employeeMax', e.target.value)}
+                          className="h-9 text-sm"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Revenue Filter */}
+                    <div className="space-y-3 md:col-span-2">
+                      <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center gap-1">
+                        <Euro className="h-3 w-3" />
+                        Umsatz (EUR)
+                      </h4>
+                      <div className="flex gap-2 max-w-md">
+                        <Input
+                          type="number"
+                          placeholder="Min"
+                          min="0"
+                          value={filters.revenueMin}
+                          onChange={(e) => updateFilter('revenueMin', e.target.value)}
+                          className="h-9 text-sm"
+                        />
+                        <span className="flex items-center text-gray-400">-</span>
+                        <Input
+                          type="number"
+                          placeholder="Max"
+                          min="0"
+                          value={filters.revenueMax}
+                          onChange={(e) => updateFilter('revenueMax', e.target.value)}
+                          className="h-9 text-sm"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Status Filters (only for companies) */}
           {searchType === 'companies' && (
             <div className="mt-4 flex flex-wrap gap-2">
               <span className="text-sm text-gray-500">Status:</span>
