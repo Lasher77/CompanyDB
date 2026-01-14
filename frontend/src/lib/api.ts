@@ -81,6 +81,11 @@ export const companiesApi = {
     status?: string
     legal_form?: string
     city?: string
+    postal_code?: string
+    employee_min?: number
+    employee_max?: number
+    revenue_min?: number
+    revenue_max?: number
     limit?: number
     offset?: number
   }) => {
@@ -89,6 +94,11 @@ export const companiesApi = {
     if (params.status) searchParams.set('status', params.status)
     if (params.legal_form) searchParams.set('legal_form', params.legal_form)
     if (params.city) searchParams.set('city', params.city)
+    if (params.postal_code) searchParams.set('postal_code', params.postal_code)
+    if (params.employee_min !== undefined) searchParams.set('employee_min', params.employee_min.toString())
+    if (params.employee_max !== undefined) searchParams.set('employee_max', params.employee_max.toString())
+    if (params.revenue_min !== undefined) searchParams.set('revenue_min', params.revenue_min.toString())
+    if (params.revenue_max !== undefined) searchParams.set('revenue_max', params.revenue_max.toString())
     if (params.limit) searchParams.set('limit', params.limit.toString())
     if (params.offset) searchParams.set('offset', params.offset.toString())
 
