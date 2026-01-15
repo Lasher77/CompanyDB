@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func, Integer, Float, text, literal_column
+from sqlalchemy import select, or_, func
 from typing import Optional
 from ..database import get_db
 from ..models import Company, Person, CompanyPerson
@@ -173,29 +173,17 @@ async def search_companies_postgres(
     if postal_code:
         query = query.where(Company.address_postal_code.ilike(f"{postal_code}%"))
 
-    # Filter by employee count from JSONB full_record -> financials -> items
-    if employee_min is not None or employee_max is not None:
-        # Extract employee count using jsonb_path_query_first with proper jsonpath cast
-        employee_expr = func.jsonb_path_query_first(
-            Company.full_record,
-            literal_column("'$.financials.items[*] ? (@.id == \"Employees\").value'::jsonpath")
-        ).cast(Integer)
-        if employee_min is not None:
-            query = query.where(employee_expr >= employee_min)
-        if employee_max is not None:
-            query = query.where(employee_expr <= employee_max)
+    # Filter by employee count (now using dedicated indexed column)
+    if employee_min is not None:
+        query = query.where(Company.employee_count >= employee_min)
+    if employee_max is not None:
+        query = query.where(Company.employee_count <= employee_max)
 
-    # Filter by revenue from JSONB full_record -> financials -> items
-    if revenue_min is not None or revenue_max is not None:
-        # Extract revenue using jsonb_path_query_first with proper jsonpath cast
-        revenue_expr = func.jsonb_path_query_first(
-            Company.full_record,
-            literal_column("'$.financials.items[*] ? (@.id == \"Revenue\").value'::jsonpath")
-        ).cast(Float)
-        if revenue_min is not None:
-            query = query.where(revenue_expr >= revenue_min)
-        if revenue_max is not None:
-            query = query.where(revenue_expr <= revenue_max)
+    # Filter by revenue (now using dedicated indexed column)
+    if revenue_min is not None:
+        query = query.where(Company.last_revenue >= revenue_min)
+    if revenue_max is not None:
+        query = query.where(Company.last_revenue <= revenue_max)
 
     # Get total count
     count_query = select(func.count()).select_from(query.subquery())
@@ -228,14 +216,16 @@ async def search_companies(
 ):
     """Search companies with optional filters. Uses OpenSearch if available, PostgreSQL as fallback."""
 
-    # Employee/revenue filters require PostgreSQL (JSONB query), skip OpenSearch
-    use_postgres_for_jsonb = (
+    # Employee/revenue filters now use indexed columns, so we can use PostgreSQL efficiently
+    # OpenSearch is still preferred for text search, but we fall back to PostgreSQL for
+    # employee/revenue filters until OpenSearch is updated with these fields
+    use_postgres_for_filters = (
         employee_min is not None or employee_max is not None or
         revenue_min is not None or revenue_max is not None
     )
 
-    # Try OpenSearch first (unless we need JSONB filters)
-    os_client = get_opensearch_client() if not use_postgres_for_jsonb else None
+    # Try OpenSearch first (unless we need employee/revenue filters)
+    os_client = get_opensearch_client() if not use_postgres_for_filters else None
 
     if os_client and q:  # Only use OpenSearch for text search
         try:
