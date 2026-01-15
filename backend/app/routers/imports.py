@@ -71,6 +71,37 @@ def extract_domain(url_or_email: str | None) -> str | None:
     return value
 
 
+def extract_financial_metrics(record: dict) -> dict:
+    """Extract employee count and revenue from NorthData financials."""
+    employee_count = None
+    last_revenue = None
+
+    financials = record.get('financials')
+    if financials and isinstance(financials, dict):
+        items = financials.get('items', [])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get('id')
+            value = item.get('value')
+
+            if item_id == 'Employees' and value is not None:
+                try:
+                    employee_count = int(value)
+                except (ValueError, TypeError):
+                    pass
+            elif item_id == 'Revenue' and value is not None:
+                try:
+                    last_revenue = float(value)
+                except (ValueError, TypeError):
+                    pass
+
+    return {
+        'employee_count': employee_count,
+        'last_revenue': last_revenue
+    }
+
+
 def extract_contact_info(record: dict) -> dict:
     """Extract email, website, phone and domain from NorthData record."""
     email = None
@@ -381,6 +412,9 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                     # Extract contact info
                     contact_info = extract_contact_info(record)
 
+                    # Extract financial metrics (employee count, revenue)
+                    financial_info = extract_financial_metrics(record)
+
                     # Parse lastUpdateTime
                     last_update_time = None
                     if record.get("lastUpdateTime"):
@@ -395,7 +429,7 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                     # Columns: import_job_id, company_id, raw_name, legal_name, legal_form, status,
                     #          terminated, register_unique_key, register_id, address_city,
                     #          address_postal_code, address_country, email, website, phone, domain,
-                    #          last_update_time, full_record, created_at
+                    #          employee_count, last_revenue, last_update_time, full_record, created_at
                     company_line = "\t".join([
                         escape_copy_value(str(job_id)),
                         escape_copy_value(company_id),
@@ -413,6 +447,8 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                         escape_copy_value(contact_info.get("website")),
                         escape_copy_value(contact_info.get("phone")),
                         escape_copy_value(contact_info.get("domain")),
+                        escape_copy_value(financial_info.get("employee_count")),
+                        escape_copy_value(financial_info.get("last_revenue")),
                         escape_copy_value(last_update_time),
                         escape_copy_value(record),
                         escape_copy_value(datetime.utcnow()),
@@ -470,6 +506,7 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                                     'status', 'terminated', 'register_unique_key', 'register_id',
                                     'address_city', 'address_postal_code', 'address_country',
                                     'email', 'website', 'phone', 'domain',
+                                    'employee_count', 'last_revenue',
                                     'last_update_time', 'full_record', 'created_at')
                         )
 
@@ -511,6 +548,7 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                             'status', 'terminated', 'register_unique_key', 'register_id',
                             'address_city', 'address_postal_code', 'address_country',
                             'email', 'website', 'phone', 'domain',
+                            'employee_count', 'last_revenue',
                             'last_update_time', 'full_record', 'created_at')
                 )
 
@@ -719,7 +757,8 @@ def run_reindex_fast():
         cursor.execute("""
             SELECT company_id, raw_name, legal_name, legal_form, status, terminated,
                    register_unique_key, register_id, address_city, address_postal_code,
-                   address_country, email, website, domain, last_update_time
+                   address_country, email, website, domain, employee_count, last_revenue,
+                   last_update_time
             FROM company
         """)
 
@@ -752,7 +791,9 @@ def run_reindex_fast():
                         "email": row[11],
                         "website": row[12],
                         "domain": row[13],
-                        "last_update_time": row[14].isoformat() if row[14] else None,
+                        "employee_count": row[14],
+                        "last_revenue": row[15],
+                        "last_update_time": row[16].isoformat() if row[16] else None,
                     }
                 })
 

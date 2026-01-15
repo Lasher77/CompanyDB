@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, Boolean, Integer, ForeignKey, DateTime, Date
+from sqlalchemy import String, Text, Boolean, Integer, BigInteger, Float, ForeignKey, DateTime, Date
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from .database import Base
@@ -42,6 +42,9 @@ class Company(Base):
     website: Mapped[str | None] = mapped_column(Text, nullable=True)
     phone: Mapped[str | None] = mapped_column(Text, nullable=True)
     domain: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)  # Normalized domain for search
+    # Financial metrics (extracted from full_record for fast filtering)
+    employee_count: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    last_revenue: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)  # Revenue in EUR
     last_update_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     full_record: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
