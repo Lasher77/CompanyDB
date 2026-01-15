@@ -52,11 +52,12 @@ def run_migration():
             start_time = time.time()
 
             # Use a more efficient UPDATE with subquery
+            # Note: Cast to double precision first, then to integer to handle "4.0" format
             update_sql = text("""
                 UPDATE company
                 SET
                     employee_count = (
-                        SELECT (item->>'value')::integer
+                        SELECT ((item->>'value')::double precision)::integer
                         FROM jsonb_array_elements(
                             CASE
                                 WHEN full_record->'financials' IS NOT NULL
