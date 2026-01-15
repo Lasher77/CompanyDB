@@ -7,11 +7,14 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Pagination, PaginationInfo } from '@/components/ui/pagination'
 import { companiesApi, personsApi } from '@/lib/api'
 import { cn, getStatusColor } from '@/lib/utils'
 import type { CompanyListItem, PersonListItem } from '@/types'
 
 type SearchType = 'companies' | 'persons'
+
+const ITEMS_PER_PAGE = 20
 
 interface Filters {
   city: string
@@ -43,14 +46,18 @@ export function SearchPage() {
   const [persons, setPersons] = useState<PersonListItem[]>([])
   const [total, setTotal] = useState(0)
   const [hasSearched, setHasSearched] = useState(false)
+  const [currentPage, setCurrentPage] = useState(1)
 
   const activeFilterCount = Object.values(filters).filter(v => v !== '').length
 
-  const handleSearch = useCallback(async () => {
+  const handleSearch = useCallback(async (page: number = 1) => {
     if (!query.trim()) return
 
     setIsLoading(true)
     setHasSearched(true)
+    setCurrentPage(page)
+
+    const offset = (page - 1) * ITEMS_PER_PAGE
 
     try {
       if (searchType === 'companies') {
@@ -63,7 +70,8 @@ export function SearchPage() {
           employee_max: filters.employeeMax ? parseInt(filters.employeeMax) : undefined,
           revenue_min: filters.revenueMin ? parseFloat(filters.revenueMin) : undefined,
           revenue_max: filters.revenueMax ? parseFloat(filters.revenueMax) : undefined,
-          limit: 20,
+          limit: ITEMS_PER_PAGE,
+          offset,
         })
         setCompanies(result.items)
         setPersons([])
@@ -72,7 +80,8 @@ export function SearchPage() {
         const result = await personsApi.search({
           q: query,
           city: filters.city || undefined,
-          limit: 20,
+          limit: ITEMS_PER_PAGE,
+          offset,
         })
         setPersons(result.items)
         setCompanies([])
@@ -85,6 +94,14 @@ export function SearchPage() {
     }
   }, [query, searchType, statusFilter, filters])
 
+  const totalPages = Math.ceil(total / ITEMS_PER_PAGE)
+
+  const handlePageChange = (page: number) => {
+    handleSearch(page)
+    // Scroll to top of results
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   const clearFilters = () => {
     setFilters(defaultFilters)
   }
@@ -95,7 +112,7 @@ export function SearchPage() {
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
-      handleSearch()
+      handleSearch(1)
     }
   }
 
@@ -161,7 +178,7 @@ export function SearchPage() {
                 className="pl-10"
               />
             </div>
-            <Button onClick={handleSearch} disabled={isLoading || !query.trim()}>
+            <Button onClick={() => handleSearch(1)} disabled={isLoading || !query.trim()}>
               {isLoading ? 'Suche...' : 'Suchen'}
             </Button>
           </div>
@@ -354,9 +371,11 @@ export function SearchPage() {
             className="space-y-4"
           >
             {/* Result count */}
-            <p className="text-sm text-gray-600">
-              {total} {total === 1 ? 'Ergebnis' : 'Ergebnisse'} gefunden
-            </p>
+            <PaginationInfo
+              currentPage={currentPage}
+              itemsPerPage={ITEMS_PER_PAGE}
+              totalItems={total}
+            />
 
             {/* Company Results */}
             {companies.length > 0 && (
@@ -464,6 +483,20 @@ export function SearchPage() {
                     </Card>
                   </motion.div>
                 ))}
+              </div>
+            )}
+
+            {/* Pagination */}
+            {(companies.length > 0 || persons.length > 0) && totalPages > 1 && (
+              <div className="mt-8 flex flex-col items-center gap-4">
+                <Pagination
+                  currentPage={currentPage}
+                  totalPages={totalPages}
+                  onPageChange={handlePageChange}
+                />
+                <p className="text-sm text-gray-500">
+                  Seite {currentPage} von {totalPages}
+                </p>
               </div>
             )}
 
