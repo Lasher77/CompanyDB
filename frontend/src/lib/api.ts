@@ -110,6 +110,45 @@ export const companiesApi = {
     fetchApi<CompanyDetail>(`/companies/${companyId}`),
 }
 
+// Export API
+export const exportApi = {
+  exportCompanies: async (companyIds: string[]) => {
+    const url = `${BASE_URL}/export/companies`
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ company_ids: companyIds }),
+    })
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new ApiError(
+        response.status,
+        response.statusText,
+        errorData.detail || `Export failed: ${response.statusText}`
+      )
+    }
+    return response.blob()
+  },
+
+  exportPersons: async (companyIds: string[]) => {
+    const url = `${BASE_URL}/export/persons`
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ company_ids: companyIds }),
+    })
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new ApiError(
+        response.status,
+        response.statusText,
+        errorData.detail || `Export failed: ${response.statusText}`
+      )
+    }
+    return response.blob()
+  },
+}
+
 // Persons API
 export const personsApi = {
   search: (params: {

@@ -122,3 +122,8 @@ class PersonDetailResponse(BaseModel):
     full_record: dict[str, Any]
     related_companies: list[PersonCompanyRole]
     created_at: datetime
+
+
+# Export schemas
+class ExportRequest(BaseModel):
+    company_ids: list[str]

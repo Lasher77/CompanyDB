@@ -1,16 +1,18 @@
 import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, Building2, User, MapPin, FileText, ChevronRight, Filter, ChevronDown, X, Users, Euro } from 'lucide-react'
+import { Search, Building2, User, MapPin, FileText, ChevronRight, Filter, ChevronDown, X, Users, Euro, Download, CheckSquare, Square, Loader2 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Pagination, PaginationInfo } from '@/components/ui/pagination'
-import { companiesApi, personsApi } from '@/lib/api'
+import { companiesApi, personsApi, exportApi } from '@/lib/api'
 import { cn, getStatusColor } from '@/lib/utils'
 import type { CompanyListItem, PersonListItem } from '@/types'
+
+const MAX_EXPORT_LIMIT = 1000
 
 type SearchType = 'companies' | 'persons'
 
@@ -47,6 +49,8 @@ export function SearchPage() {
   const [total, setTotal] = useState(0)
   const [hasSearched, setHasSearched] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set())
+  const [isExporting, setIsExporting] = useState(false)
 
   const activeFilterCount = Object.values(filters).filter(v => v !== '').length
 
@@ -115,6 +119,96 @@ export function SearchPage() {
       handleSearch(1)
     }
   }
+
+  const toggleCompanySelection = (companyId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setSelectedCompanies(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(companyId)) {
+        newSet.delete(companyId)
+      } else {
+        if (newSet.size >= MAX_EXPORT_LIMIT) {
+          alert(`Maximal ${MAX_EXPORT_LIMIT} Unternehmen können ausgewählt werden.`)
+          return prev
+        }
+        newSet.add(companyId)
+      }
+      return newSet
+    })
+  }
+
+  const selectAllOnPage = () => {
+    const currentIds = companies.map(c => c.company_id)
+    setSelectedCompanies(prev => {
+      const newSet = new Set(prev)
+      const allSelected = currentIds.every(id => newSet.has(id))
+
+      if (allSelected) {
+        // Deselect all on current page
+        currentIds.forEach(id => newSet.delete(id))
+      } else {
+        // Select all on current page (up to limit)
+        for (const id of currentIds) {
+          if (newSet.size >= MAX_EXPORT_LIMIT) {
+            alert(`Maximal ${MAX_EXPORT_LIMIT} Unternehmen können ausgewählt werden.`)
+            break
+          }
+          newSet.add(id)
+        }
+      }
+      return newSet
+    })
+  }
+
+  const clearSelection = () => {
+    setSelectedCompanies(new Set())
+  }
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    window.URL.revokeObjectURL(url)
+    document.body.removeChild(a)
+  }
+
+  const handleExport = async () => {
+    if (selectedCompanies.size === 0) {
+      alert('Bitte wählen Sie mindestens ein Unternehmen aus.')
+      return
+    }
+
+    setIsExporting(true)
+    const companyIds = Array.from(selectedCompanies)
+
+    try {
+      // Export both CSVs
+      const [companiesBlob, personsBlob] = await Promise.all([
+        exportApi.exportCompanies(companyIds),
+        exportApi.exportPersons(companyIds),
+      ])
+
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_')
+
+      // Download both files
+      downloadBlob(companiesBlob, `companies_export_${timestamp}.csv`)
+      // Small delay to avoid browser blocking multiple downloads
+      setTimeout(() => {
+        downloadBlob(personsBlob, `persons_export_${timestamp}.csv`)
+      }, 100)
+
+    } catch (error) {
+      console.error('Export error:', error)
+      alert('Export fehlgeschlagen. Bitte versuchen Sie es erneut.')
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  const allOnPageSelected = companies.length > 0 && companies.every(c => selectedCompanies.has(c.company_id))
 
   return (
     <div className="space-y-8">
@@ -370,72 +464,152 @@ export function SearchPage() {
             exit={{ opacity: 0 }}
             className="space-y-4"
           >
-            {/* Result count */}
-            <PaginationInfo
-              currentPage={currentPage}
-              itemsPerPage={ITEMS_PER_PAGE}
-              totalItems={total}
-            />
+            {/* Result count and export toolbar */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <PaginationInfo
+                currentPage={currentPage}
+                itemsPerPage={ITEMS_PER_PAGE}
+                totalItems={total}
+              />
+
+              {/* Export toolbar - only for companies */}
+              {searchType === 'companies' && companies.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={selectAllOnPage}
+                    className="text-xs"
+                  >
+                    {allOnPageSelected ? (
+                      <>
+                        <CheckSquare className="h-3.5 w-3.5 mr-1" />
+                        Seite abwählen
+                      </>
+                    ) : (
+                      <>
+                        <Square className="h-3.5 w-3.5 mr-1" />
+                        Seite auswählen
+                      </>
+                    )}
+                  </Button>
+
+                  {selectedCompanies.size > 0 && (
+                    <>
+                      <Badge variant="secondary" className="text-xs">
+                        {selectedCompanies.size} ausgewählt
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={clearSelection}
+                        className="text-xs text-gray-500"
+                      >
+                        <X className="h-3.5 w-3.5 mr-1" />
+                        Auswahl aufheben
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={handleExport}
+                        disabled={isExporting}
+                        className="bg-green-600 hover:bg-green-700 text-white text-xs"
+                      >
+                        {isExporting ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                            Exportiere...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="h-3.5 w-3.5 mr-1" />
+                            CSV Export
+                          </>
+                        )}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Company Results */}
             {companies.length > 0 && (
               <div className="space-y-3">
-                {companies.map((company) => (
-                  <motion.div
-                    key={company.company_id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    whileHover={{ scale: 1.01 }}
-                    transition={{ duration: 0.2 }}
-                  >
-                    <Card
-                      className="cursor-pointer transition-shadow hover:shadow-md"
-                      onClick={() => navigate(`/companies/${company.company_id}`)}
+                {companies.map((company) => {
+                  const isSelected = selectedCompanies.has(company.company_id)
+                  return (
+                    <motion.div
+                      key={company.company_id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      whileHover={{ scale: 1.01 }}
+                      transition={{ duration: 0.2 }}
                     >
-                      <CardContent className="p-4">
-                        <div className="flex items-start justify-between">
-                          <div className="flex items-start gap-4">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-100">
-                              <Building2 className="h-5 w-5 text-gray-600" />
-                            </div>
-                            <div>
-                              <h3 className="font-medium text-gray-900">
-                                {company.legal_name || company.raw_name || 'Unbekannt'}
-                              </h3>
-                              <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-500">
-                                {company.legal_form && (
-                                  <span className="flex items-center gap-1">
-                                    <FileText className="h-3 w-3" />
-                                    {company.legal_form}
-                                  </span>
+                      <Card
+                        className={cn(
+                          "cursor-pointer transition-all hover:shadow-md",
+                          isSelected && "ring-2 ring-blue-500 bg-blue-50/50"
+                        )}
+                        onClick={() => navigate(`/companies/${company.company_id}`)}
+                      >
+                        <CardContent className="p-4">
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-start gap-4">
+                              {/* Checkbox */}
+                              <button
+                                onClick={(e) => toggleCompanySelection(company.company_id, e)}
+                                className={cn(
+                                  "flex h-10 w-10 items-center justify-center rounded-full transition-colors",
+                                  isSelected
+                                    ? "bg-blue-500 text-white"
+                                    : "bg-gray-100 hover:bg-gray-200"
                                 )}
-                                {company.address_city && (
-                                  <span className="flex items-center gap-1">
-                                    <MapPin className="h-3 w-3" />
-                                    {company.address_city}
-                                  </span>
+                              >
+                                {isSelected ? (
+                                  <CheckSquare className="h-5 w-5" />
+                                ) : (
+                                  <Building2 className="h-5 w-5 text-gray-600" />
                                 )}
-                                {company.register_id && (
-                                  <span className="text-gray-400">
-                                    {company.register_id}
-                                  </span>
-                                )}
+                              </button>
+                              <div>
+                                <h3 className="font-medium text-gray-900">
+                                  {company.legal_name || company.raw_name || 'Unbekannt'}
+                                </h3>
+                                <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-500">
+                                  {company.legal_form && (
+                                    <span className="flex items-center gap-1">
+                                      <FileText className="h-3 w-3" />
+                                      {company.legal_form}
+                                    </span>
+                                  )}
+                                  {company.address_city && (
+                                    <span className="flex items-center gap-1">
+                                      <MapPin className="h-3 w-3" />
+                                      {company.address_city}
+                                    </span>
+                                  )}
+                                  {company.register_id && (
+                                    <span className="text-gray-400">
+                                      {company.register_id}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             </div>
+                            <div className="flex items-center gap-2">
+                              {company.status && (
+                                <Badge className={getStatusColor(company.status)}>
+                                  {company.status}
+                                </Badge>
+                              )}
+                              <ChevronRight className="h-5 w-5 text-gray-400" />
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            {company.status && (
-                              <Badge className={getStatusColor(company.status)}>
-                                {company.status}
-                              </Badge>
-                            )}
-                            <ChevronRight className="h-5 w-5 text-gray-400" />
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  </motion.div>
-                ))}
+                        </CardContent>
+                      </Card>
+                    </motion.div>
+                  )
+                })}
               </div>
             )}
 
