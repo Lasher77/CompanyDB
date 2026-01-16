@@ -21,12 +21,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS for frontend - configured via CORS_ORIGINS environment variable
-cors_origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+# CORS - allow all origins for API access (Salesforce, local testing, etc.)
+# Authentication is handled via Bearer token, not cookies
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
