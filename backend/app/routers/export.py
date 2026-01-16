@@ -48,20 +48,27 @@ def extract_address_street_from_record(full_record: dict) -> str | None:
     return address.get("street") or None
 
 
-def is_current_role(role_date: date | None) -> bool:
-    """Check if a role is current (not historical).
+def extract_wz_code_from_record(full_record: dict) -> str:
+    """Extract WZ code (Wirtschaftszweig) from segmentCodes.
 
-    A role is considered current if:
-    - It has a role_date that is within the last 2 years, OR
-    - It has no role_date (we assume it's current)
+    Tries wz2025 first, then wz. Returns code and description combined.
     """
-    if role_date is None:
-        return True
+    segment_codes = full_record.get("segmentCodes", {})
 
-    today = datetime.now().date()
-    # Consider roles from the last 2 years as "current"
-    cutoff_date = date(today.year - 2, today.month, today.day)
-    return role_date >= cutoff_date
+    # Try wz2025 first (newer classification)
+    wz_codes = segment_codes.get("wz2025", []) or segment_codes.get("wz", [])
+
+    if not wz_codes:
+        return ""
+
+    # Return first WZ code with description
+    first_code = wz_codes[0] if wz_codes else {}
+    code = first_code.get("code", "")
+    description = first_code.get("description", "")
+
+    if code and description:
+        return f"{code} - {description}"
+    return code or description or ""
 
 
 def format_currency(value: float | None) -> str:
@@ -124,6 +131,7 @@ async def export_companies(
         "Founding Year",
         "Employee Count",
         "Revenue (EUR)",
+        "WZ Code",
         "Register ID"
     ])
 
@@ -147,6 +155,7 @@ async def export_companies(
             extract_founding_year_from_record(full_record) or "",
             company.employee_count if company.employee_count is not None else "",
             format_currency(company.last_revenue),
+            extract_wz_code_from_record(full_record),
             company.register_id or ""
         ])
 
@@ -175,7 +184,6 @@ async def export_persons(
 ):
     """Export persons related to selected companies as CSV.
 
-    Only includes persons with current roles (not historical).
     Returns a CSV with:
     - Person data (name, birth date, city)
     - Role information (type, description)
@@ -224,12 +232,8 @@ async def export_persons(
         "Role Date"
     ])
 
-    # Write data - only current roles
+    # Write data - all persons
     for cp, person in persons_result:
-        # Skip historical roles
-        if not is_current_role(cp.role_date):
-            continue
-
         company = companies.get(cp.company_db_id)
         if not company:
             continue
