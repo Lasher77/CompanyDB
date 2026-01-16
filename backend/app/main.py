@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
 from .routers import health, imports, companies, persons, api
+from .config import settings
 
 
 @asynccontextmanager
@@ -20,10 +21,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS for frontend and API tester
+# CORS for frontend - configured via CORS_ORIGINS environment variable
+cors_origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for API testing
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

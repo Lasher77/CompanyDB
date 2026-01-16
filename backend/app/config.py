@@ -4,6 +4,9 @@ from typing import List
 
 
 class Settings(BaseSettings):
+    # CORS - comma-separated list of allowed origins
+    cors_origins: str = "http://localhost:5173,http://localhost:3000"
+
     # PostgreSQL
     database_url: str = "postgresql+asyncpg://companydb:companydb@localhost:5432/companydb"
     database_url_sync: str = "postgresql://companydb:companydb@localhost:5432/companydb"
