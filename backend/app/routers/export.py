@@ -51,24 +51,18 @@ def extract_address_street_from_record(full_record: dict) -> str | None:
 def extract_wz_code_from_record(full_record: dict) -> str:
     """Extract WZ code (Wirtschaftszweig) from segmentCodes.
 
-    Tries wz2025 first, then wz. Returns code and description combined.
+    Tries wz2025 first, then wz. WZ codes are stored as string arrays.
     """
     segment_codes = full_record.get("segmentCodes", {})
 
-    # Try wz2025 first (newer classification)
+    # Try wz2025 first (newer classification), then wz
     wz_codes = segment_codes.get("wz2025", []) or segment_codes.get("wz", [])
 
     if not wz_codes:
         return ""
 
-    # Return first WZ code with description
-    first_code = wz_codes[0] if wz_codes else {}
-    code = first_code.get("code", "")
-    description = first_code.get("description", "")
-
-    if code and description:
-        return f"{code} - {description}"
-    return code or description or ""
+    # Return first WZ code (it's a simple string)
+    return str(wz_codes[0]) if wz_codes else ""
 
 
 def format_currency(value: float | None) -> str:
