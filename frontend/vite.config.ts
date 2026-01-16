@@ -10,10 +10,12 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 5174,
+    host: true,
+    allowedHosts: ['bvmw-nd.wits-berlin.org'],
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:8009',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
