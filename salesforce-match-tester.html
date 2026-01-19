@@ -453,6 +453,57 @@
             <div id="companyDetailStatus"></div>
             <pre class="json-output" id="companyDetailOutput"></pre>
         </div>
+
+        <!-- Company Employees Lookup -->
+        <div class="card">
+            <h2>Company Employees (by Company ID)</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="employeesCompanyId">Company ID</label>
+                    <input type="text" id="employeesCompanyId" placeholder="z.B. 5653371433517056">
+                </div>
+            </div>
+            <div class="form-row">
+                <button onclick="lookupEmployees()" id="employeesBtn">Mitarbeiter abrufen</button>
+            </div>
+            <div class="endpoint-display">
+                GET /api/v1/company/{company_id}/employees
+            </div>
+        </div>
+
+        <!-- Employees Results -->
+        <div class="card" id="employeesResultsCard" style="display: none;">
+            <h2>Mitarbeiter</h2>
+            <div id="employeesStatusMessage"></div>
+
+            <div class="tabs">
+                <button class="tab active" onclick="showEmployeesTab('table')">Tabelle</button>
+                <button class="tab" onclick="showEmployeesTab('json')">JSON Response</button>
+            </div>
+
+            <div id="employeesTableTab" class="tab-content active">
+                <div id="employeesCount"></div>
+                <table class="results-table" id="employeesTable">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Name</th>
+                            <th>Geburtsdatum</th>
+                            <th>Position</th>
+                            <th>Stadt</th>
+                            <th>PLZ</th>
+                            <th>Straße</th>
+                        </tr>
+                    </thead>
+                    <tbody id="employeesBody">
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="employeesJsonTab" class="tab-content">
+                <pre class="json-output" id="employeesJsonOutput"></pre>
+            </div>
+        </div>
     </div>
 
     <!-- Modal for company details -->
@@ -704,6 +755,100 @@
                 closeModal();
             }
         });
+
+        // Employees API Functions
+        async function lookupEmployees() {
+            const btn = document.getElementById('employeesBtn');
+            btn.disabled = true;
+            btn.textContent = 'Lädt...';
+
+            const apiUrl = document.getElementById('apiUrl').value;
+            const bearerToken = document.getElementById('bearerToken').value;
+            const companyId = document.getElementById('employeesCompanyId').value.trim();
+
+            if (!companyId) {
+                document.getElementById('employeesResultsCard').style.display = 'block';
+                document.getElementById('employeesStatusMessage').innerHTML = '<div class="status error">Company ID erforderlich</div>';
+                btn.disabled = false;
+                btn.textContent = 'Mitarbeiter abrufen';
+                return;
+            }
+
+            document.getElementById('employeesResultsCard').style.display = 'block';
+
+            try {
+                const headers = {};
+                if (bearerToken) {
+                    headers['Authorization'] = `Bearer ${bearerToken}`;
+                }
+
+                const response = await fetch(`${apiUrl}/api/v1/company/${encodeURIComponent(companyId)}/employees`, {
+                    method: 'GET',
+                    headers: headers
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    document.getElementById('employeesStatusMessage').innerHTML =
+                        `<div class="status error">Fehler ${response.status}: ${data.detail || JSON.stringify(data)}</div>`;
+                    document.getElementById('employeesJsonOutput').textContent = JSON.stringify(data, null, 2);
+                    document.getElementById('employeesBody').innerHTML = '';
+                    document.getElementById('employeesCount').textContent = '';
+                } else {
+                    const statusText = `${data.total} Mitarbeiter (${data.active_count} aktiv, ${data.inactive_count} inaktiv)`;
+                    document.getElementById('employeesStatusMessage').innerHTML =
+                        `<div class="status success">${data.company_name}: ${statusText}</div>`;
+                    document.getElementById('employeesJsonOutput').textContent = JSON.stringify(data, null, 2);
+                    renderEmployees(data.employees);
+                    document.getElementById('employeesCount').textContent = statusText;
+                }
+
+            } catch (error) {
+                document.getElementById('employeesStatusMessage').innerHTML =
+                    `<div class="status error">Verbindungsfehler: ${error.message}</div>`;
+                document.getElementById('employeesJsonOutput').textContent = error.toString();
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Mitarbeiter abrufen';
+        }
+
+        function renderEmployees(employees) {
+            const tbody = document.getElementById('employeesBody');
+            tbody.innerHTML = '';
+
+            employees.forEach(emp => {
+                const tr = document.createElement('tr');
+
+                const statusClass = emp.is_active ? 'score-high' : 'score-low';
+                const statusText = emp.is_active ? 'Aktiv' : 'Inaktiv';
+
+                const fullName = [emp.first_name, emp.last_name].filter(Boolean).join(' ') || '-';
+                const address = emp.address || {};
+
+                tr.innerHTML = `
+                    <td><span class="score-badge ${statusClass}">${statusText}</span></td>
+                    <td>${fullName}</td>
+                    <td>${emp.birth_date || '-'}</td>
+                    <td>${emp.position?.description || emp.position?.type || '-'}</td>
+                    <td>${address.city || '-'}</td>
+                    <td>${address.postal_code || '-'}</td>
+                    <td>${address.street || '-'}</td>
+                `;
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function showEmployeesTab(tabName) {
+            const card = document.getElementById('employeesResultsCard');
+            card.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            card.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+
+            event.target.classList.add('active');
+            document.getElementById('employees' + tabName.charAt(0).toUpperCase() + tabName.slice(1) + 'Tab').classList.add('active');
+        }
     </script>
 </body>
 </html>
