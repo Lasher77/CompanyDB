@@ -91,11 +91,14 @@ class MatchedCompany(BaseModel):
     address_city: Optional[str]
     address_postal_code: Optional[str]
     address_country: Optional[str]
+    address_street: Optional[str] = None
     register_id: Optional[str]
     register_unique_key: Optional[str]
     email: Optional[str]
     website: Optional[str]
     domain: Optional[str]
+    last_revenue: Optional[float] = None
+    wz_code: Optional[str] = None
     score: float
     match_details: dict
 
@@ -246,6 +249,32 @@ def calculate_similarity(s1: str, s2: str) -> float:
             jaccard = max(jaccard, 0.8)
 
     return jaccard
+
+
+def extract_address_street(full_record: Optional[dict]) -> Optional[str]:
+    """Extract street address from company full_record."""
+    if not full_record:
+        return None
+    address = full_record.get("address", {})
+    return address.get("street") or None
+
+
+def extract_wz_code(full_record: Optional[dict]) -> Optional[str]:
+    """Extract WZ code (Wirtschaftszweig) from segmentCodes.
+
+    Prefers 'wz' (older classification), falls back to 'wz2025' (newer).
+    """
+    if not full_record:
+        return None
+    segment_codes = full_record.get("segmentCodes", {})
+
+    # Prefer wz (older classification), then wz2025 (newer)
+    wz_codes = segment_codes.get("wz", []) or segment_codes.get("wz2025", [])
+
+    if not wz_codes:
+        return None
+
+    return str(wz_codes[0]) if wz_codes else None
 
 
 def calculate_name_score(query_name: str, company_name: str) -> float:
@@ -497,11 +526,14 @@ async def match_companies(
                 address_city=company.address_city,
                 address_postal_code=company.address_postal_code,
                 address_country=company.address_country,
+                address_street=extract_address_street(company.full_record),
                 register_id=company.register_id,
                 register_unique_key=company.register_unique_key,
                 email=company.email,
                 website=company.website,
                 domain=company.domain,
+                last_revenue=company.last_revenue,
+                wz_code=extract_wz_code(company.full_record),
                 score=round(score, 3),
                 match_details=match_details
             ))
