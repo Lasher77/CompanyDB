@@ -562,3 +562,169 @@ async def get_company_by_id(
             "full_record": company.full_record
         }
     }
+
+
+# Employee API Models
+class EmployeeAddress(BaseModel):
+    street: Optional[str] = None
+    postal_code: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+
+
+class EmployeePosition(BaseModel):
+    type: Optional[str] = None
+    description: Optional[str] = None
+    date: Optional[str] = None
+
+
+class Employee(BaseModel):
+    person_id: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    birth_date: Optional[str] = None
+    address: EmployeeAddress
+    position: EmployeePosition
+    is_active: bool
+
+
+class CompanyEmployeesResponse(BaseModel):
+    success: bool
+    company_id: str
+    company_name: Optional[str] = None
+    employees: List[Employee]
+    total: int
+    active_count: int
+    inactive_count: int
+
+
+def determine_employee_status(related_person: dict) -> bool:
+    """
+    Determine if an employee is currently active in their position.
+
+    Returns True if active, False if inactive.
+
+    Logic:
+    1. Check if description starts with "ehem." (former) -> inactive
+    2. Check the last role entry - if it has "demotion: true" -> inactive
+    3. Otherwise -> active
+    """
+    description = related_person.get("description", "")
+
+    # Check for "ehem." (ehemaliger/ehemalige = former)
+    if description and description.lower().startswith("ehem."):
+        return False
+
+    # Check roles for demotion flag
+    roles = related_person.get("roles", [])
+    if roles:
+        # Get the last role entry (most recent)
+        last_role = roles[-1]
+        if last_role.get("demotion", False):
+            return False
+
+    return True
+
+
+def extract_employee_from_related_person(related_person: dict) -> Employee:
+    """Extract employee data from a relatedPersons item."""
+    person_data = related_person.get("person", {})
+    address_data = person_data.get("address", {})
+    name_data = person_data.get("name", {})
+    roles = related_person.get("roles", [])
+
+    # Get the most recent active role (or last role if all are demotions)
+    current_role = None
+    for role in reversed(roles):
+        if not role.get("demotion", False):
+            current_role = role
+            break
+
+    # If no active role found, use the last role before demotion
+    if current_role is None and roles:
+        # Find the last non-demotion role
+        for role in reversed(roles):
+            if role.get("demotion", False):
+                continue
+            current_role = role
+            break
+        # If still none, just use the first role
+        if current_role is None:
+            current_role = roles[0] if roles else {}
+
+    return Employee(
+        person_id=person_data.get("id", ""),
+        first_name=name_data.get("firstName"),
+        last_name=name_data.get("lastName"),
+        birth_date=person_data.get("birthDate"),
+        address=EmployeeAddress(
+            street=address_data.get("street") or None,
+            postal_code=address_data.get("postalCode") or None,
+            city=address_data.get("city") or None,
+            state=address_data.get("state") or None,
+            country=address_data.get("country") or None,
+        ),
+        position=EmployeePosition(
+            type=current_role.get("type") if current_role else related_person.get("description"),
+            description=related_person.get("description"),
+            date=current_role.get("date") if current_role else None,
+        ),
+        is_active=determine_employee_status(related_person)
+    )
+
+
+@router.get("/company/{company_id}/employees", response_model=CompanyEmployeesResponse)
+async def get_company_employees(
+    company_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(verify_api_key)
+):
+    """
+    Get all employees (related persons) for a company.
+
+    Returns employee details including:
+    - Personal info (name, birth date)
+    - Address
+    - Position/role
+    - Active/inactive status
+
+    The active status is determined by:
+    1. If description starts with "ehem." (former) -> inactive
+    2. If the last role has "demotion: true" -> inactive
+    3. Otherwise -> active
+    """
+    result = await db.execute(
+        select(Company).where(Company.company_id == company_id)
+    )
+    company = result.scalar_one_or_none()
+
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    # Extract employees from full_record
+    full_record = company.full_record or {}
+    related_persons = full_record.get("relatedPersons", {}).get("items", [])
+
+    employees = []
+    active_count = 0
+    inactive_count = 0
+
+    for rp in related_persons:
+        employee = extract_employee_from_related_person(rp)
+        employees.append(employee)
+
+        if employee.is_active:
+            active_count += 1
+        else:
+            inactive_count += 1
+
+    return CompanyEmployeesResponse(
+        success=True,
+        company_id=company.company_id,
+        company_name=company.legal_name or company.raw_name,
+        employees=employees,
+        total=len(employees),
+        active_count=active_count,
+        inactive_count=inactive_count
+    )
