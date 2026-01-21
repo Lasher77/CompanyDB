@@ -99,6 +99,7 @@ class MatchedCompany(BaseModel):
     domain: Optional[str]
     last_revenue: Optional[float] = None
     wz_code: Optional[str] = None
+    employee_count: Optional[int] = None
     score: float
     match_details: dict
 
@@ -534,6 +535,7 @@ async def match_companies(
                 domain=company.domain,
                 last_revenue=company.last_revenue,
                 wz_code=extract_wz_code(company.full_record),
+                employee_count=company.employee_count,
                 score=round(score, 3),
                 match_details=match_details
             ))
