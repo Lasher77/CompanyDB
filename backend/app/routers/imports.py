@@ -72,29 +72,68 @@ def extract_domain(url_or_email: str | None) -> str | None:
 
 
 def extract_financial_metrics(record: dict) -> dict:
-    """Extract employee count and revenue from NorthData financials."""
+    """Extract employee count and revenue from NorthData financials.
+
+    Searches in two locations:
+    1. record['financials']['items'] - current/latest financials
+    2. record['history']['financials'] - historical financials (sorted by date, newest first)
+    """
     employee_count = None
     last_revenue = None
 
-    financials = record.get('financials')
-    if financials and isinstance(financials, dict):
-        items = financials.get('items', [])
+    # Helper to extract values from a financials items list
+    def extract_from_items(items: list) -> tuple:
+        emp = None
+        rev = None
         for item in items:
             if not isinstance(item, dict):
                 continue
             item_id = item.get('id')
             value = item.get('value')
 
-            if item_id == 'Employees' and value is not None:
+            if item_id == 'Employees' and value is not None and emp is None:
                 try:
-                    employee_count = int(value)
+                    emp = int(value)
                 except (ValueError, TypeError):
                     pass
-            elif item_id == 'Revenue' and value is not None:
+            elif item_id == 'Revenue' and value is not None and rev is None:
                 try:
-                    last_revenue = float(value)
+                    rev = float(value)
                 except (ValueError, TypeError):
                     pass
+        return emp, rev
+
+    # 1. Try current financials first
+    financials = record.get('financials')
+    if financials and isinstance(financials, dict):
+        items = financials.get('items', [])
+        employee_count, last_revenue = extract_from_items(items)
+
+    # 2. If not found, search in history.financials (sorted by date descending)
+    if employee_count is None or last_revenue is None:
+        history = record.get('history', {})
+        history_financials = history.get('financials', [])
+
+        if history_financials and isinstance(history_financials, list):
+            # Sort by date descending to get most recent first
+            sorted_financials = sorted(
+                [f for f in history_financials if isinstance(f, dict)],
+                key=lambda x: x.get('date', ''),
+                reverse=True
+            )
+
+            for fin_entry in sorted_financials:
+                items = fin_entry.get('items', [])
+                hist_emp, hist_rev = extract_from_items(items)
+
+                if employee_count is None and hist_emp is not None:
+                    employee_count = hist_emp
+                if last_revenue is None and hist_rev is not None:
+                    last_revenue = hist_rev
+
+                # Stop if we found both
+                if employee_count is not None and last_revenue is not None:
+                    break
 
     return {
         'employee_count': employee_count,
