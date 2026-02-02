@@ -96,7 +96,9 @@ class MatchedCompany(BaseModel):
     register_unique_key: Optional[str]
     email: Optional[str]
     website: Optional[str]
+    phone: Optional[str] = None
     domain: Optional[str]
+    founding_year: Optional[int] = None
     last_revenue: Optional[float] = None
     wz_code: Optional[str] = None
     employee_count: Optional[int] = None
@@ -276,6 +278,31 @@ def extract_wz_code(full_record: Optional[dict]) -> Optional[str]:
         return None
 
     return str(wz_codes[0]) if wz_codes else None
+
+
+def extract_founding_year(full_record: Optional[dict]) -> Optional[int]:
+    """Extract founding year from events.
+
+    Searches for 'NewCompany' event type (company registration/founding)
+    and extracts the year from the event date.
+    """
+    if not full_record:
+        return None
+
+    events = full_record.get("events", {})
+    items = events.get("items", [])
+
+    for event in items:
+        if event.get("type") == "NewCompany":
+            date_str = event.get("date")
+            if date_str:
+                try:
+                    # Date format is "YYYY-MM-DD"
+                    return int(date_str[:4])
+                except (ValueError, TypeError):
+                    pass
+
+    return None
 
 
 def calculate_name_score(query_name: str, company_name: str) -> float:
@@ -532,7 +559,9 @@ async def match_companies(
                 register_unique_key=company.register_unique_key,
                 email=company.email,
                 website=company.website,
+                phone=company.phone,
                 domain=company.domain,
+                founding_year=extract_founding_year(company.full_record),
                 last_revenue=company.last_revenue,
                 wz_code=extract_wz_code(company.full_record),
                 employee_count=company.employee_count,
@@ -577,6 +606,7 @@ async def get_company_by_id(
             "legal_form": company.legal_form,
             "status": company.status,
             "terminated": company.terminated,
+            "founding_year": extract_founding_year(company.full_record),
             "address": {
                 "city": company.address_city,
                 "postal_code": company.address_postal_code,
