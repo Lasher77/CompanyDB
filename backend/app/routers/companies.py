@@ -90,9 +90,21 @@ async def search_companies_opensearch(
         })
 
     if postal_code:
-        filter_clauses.append({
-            "prefix": {"address_postal_code": postal_code}
-        })
+        postal_codes = [pc.strip() for pc in postal_code.split(",") if pc.strip()]
+        if len(postal_codes) == 1:
+            filter_clauses.append({
+                "prefix": {"address_postal_code": postal_codes[0]}
+            })
+        elif len(postal_codes) > 1:
+            filter_clauses.append({
+                "bool": {
+                    "should": [
+                        {"prefix": {"address_postal_code": pc}}
+                        for pc in postal_codes
+                    ],
+                    "minimum_should_match": 1
+                }
+            })
 
     query_body = {
         "query": {
@@ -171,7 +183,13 @@ async def search_companies_postgres(
         query = query.where(Company.address_city.ilike(f"%{city}%"))
 
     if postal_code:
-        query = query.where(Company.address_postal_code.ilike(f"{postal_code}%"))
+        postal_codes = [pc.strip() for pc in postal_code.split(",") if pc.strip()]
+        if len(postal_codes) == 1:
+            query = query.where(Company.address_postal_code.ilike(f"{postal_codes[0]}%"))
+        elif len(postal_codes) > 1:
+            query = query.where(or_(
+                *(Company.address_postal_code.ilike(f"{pc}%") for pc in postal_codes)
+            ))
 
     # Filter by employee count (now using dedicated indexed column)
     if employee_min is not None:
@@ -205,7 +223,7 @@ async def search_companies(
     status: Optional[str] = Query(None, description="Filter by status (active/terminated/liquidation)"),
     legal_form: Optional[str] = Query(None, description="Filter by legal form"),
     city: Optional[str] = Query(None, description="Filter by city"),
-    postal_code: Optional[str] = Query(None, description="Filter by postal code (prefix match)"),
+    postal_code: Optional[str] = Query(None, description="Filter by postal code (prefix match, comma-separated for multiple)"),
     employee_min: Optional[int] = Query(None, ge=0, description="Minimum employee count"),
     employee_max: Optional[int] = Query(None, ge=0, description="Maximum employee count"),
     revenue_min: Optional[float] = Query(None, ge=0, description="Minimum revenue in EUR"),
