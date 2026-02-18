@@ -344,7 +344,7 @@ export function SearchPage() {
                         />
                         <Input
                           type="text"
-                          placeholder="Postleitzahl"
+                          placeholder="PLZ (z.B. 10115, 20095)"
                           value={filters.postalCode}
                           onChange={(e) => updateFilter('postalCode', e.target.value)}
                           className="h-9 text-sm"
