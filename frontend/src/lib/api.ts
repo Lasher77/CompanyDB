@@ -82,6 +82,7 @@ export const companiesApi = {
     legal_form?: string
     city?: string
     postal_code?: string
+    wz_code?: string
     employee_min?: number
     employee_max?: number
     revenue_min?: number
@@ -95,6 +96,7 @@ export const companiesApi = {
     if (params.legal_form) searchParams.set('legal_form', params.legal_form)
     if (params.city) searchParams.set('city', params.city)
     if (params.postal_code) searchParams.set('postal_code', params.postal_code)
+    if (params.wz_code) searchParams.set('wz_code', params.wz_code)
     if (params.employee_min !== undefined) searchParams.set('employee_min', params.employee_min.toString())
     if (params.employee_max !== undefined) searchParams.set('employee_max', params.employee_max.toString())
     if (params.revenue_min !== undefined) searchParams.set('revenue_min', params.revenue_min.toString())

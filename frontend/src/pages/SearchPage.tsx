@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, Building2, User, MapPin, FileText, ChevronRight, Filter, ChevronDown, X, Users, Euro, Download, CheckSquare, Square, Loader2 } from 'lucide-react'
+import { Search, Building2, User, MapPin, FileText, ChevronRight, Filter, ChevronDown, X, Users, Euro, Download, CheckSquare, Square, Loader2, Tag } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -21,6 +21,7 @@ const ITEMS_PER_PAGE = 20
 interface Filters {
   city: string
   postalCode: string
+  wzCode: string
   employeeMin: string
   employeeMax: string
   revenueMin: string
@@ -30,6 +31,7 @@ interface Filters {
 const defaultFilters: Filters = {
   city: '',
   postalCode: '',
+  wzCode: '',
   employeeMin: '',
   employeeMax: '',
   revenueMin: '',
@@ -70,6 +72,7 @@ export function SearchPage() {
           status: statusFilter || undefined,
           city: filters.city || undefined,
           postal_code: filters.postalCode || undefined,
+          wz_code: filters.wzCode || undefined,
           employee_min: filters.employeeMin ? parseInt(filters.employeeMin) : undefined,
           employee_max: filters.employeeMax ? parseInt(filters.employeeMax) : undefined,
           revenue_min: filters.revenueMin ? parseFloat(filters.revenueMin) : undefined,
@@ -347,6 +350,23 @@ export function SearchPage() {
                           placeholder="PLZ (z.B. 10115, 20095)"
                           value={filters.postalCode}
                           onChange={(e) => updateFilter('postalCode', e.target.value)}
+                          className="h-9 text-sm"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Industry Code Filter */}
+                    <div className="space-y-3">
+                      <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center gap-1">
+                        <Tag className="h-3 w-3" />
+                        Branche (WZ-Code)
+                      </h4>
+                      <div className="space-y-2">
+                        <Input
+                          type="text"
+                          placeholder="WZ-Code (z.B. 62.01, 70.22)"
+                          value={filters.wzCode}
+                          onChange={(e) => updateFilter('wzCode', e.target.value)}
                           className="h-9 text-sm"
                         />
                       </div>
