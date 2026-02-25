@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, text
 from typing import Optional
 from ..database import get_db
 from ..models import Company, Person, CompanyPerson
@@ -38,6 +38,7 @@ async def search_companies_opensearch(
     legal_form: Optional[str],
     city: Optional[str],
     postal_code: Optional[str],
+    wz_code: Optional[str],
     limit: int,
     offset: int
 ) -> tuple[list[dict], int]:
@@ -106,6 +107,23 @@ async def search_companies_opensearch(
                 }
             })
 
+    if wz_code:
+        wz_codes = [wc.strip() for wc in wz_code.split(",") if wc.strip()]
+        if len(wz_codes) == 1:
+            filter_clauses.append({
+                "prefix": {"segment_codes_wz": wz_codes[0]}
+            })
+        elif len(wz_codes) > 1:
+            filter_clauses.append({
+                "bool": {
+                    "should": [
+                        {"prefix": {"segment_codes_wz": wc}}
+                        for wc in wz_codes
+                    ],
+                    "minimum_should_match": 1
+                }
+            })
+
     query_body = {
         "query": {
             "bool": {
@@ -151,6 +169,7 @@ async def search_companies_postgres(
     legal_form: Optional[str],
     city: Optional[str],
     postal_code: Optional[str],
+    wz_code: Optional[str],
     employee_min: Optional[int],
     employee_max: Optional[int],
     revenue_min: Optional[float],
@@ -191,6 +210,23 @@ async def search_companies_postgres(
                 *(Company.address_postal_code.ilike(f"{pc}%") for pc in postal_codes)
             ))
 
+    if wz_code:
+        wz_codes = [wc.strip() for wc in wz_code.split(",") if wc.strip()]
+        wz_conditions = []
+        for i, wc in enumerate(wz_codes):
+            param_name = f"wz_{i}"
+            wz_conditions.append(text(
+                f"EXISTS ("
+                f"SELECT 1 FROM jsonb_array_elements_text("
+                f"COALESCE(full_record->'segmentCodes'->'wz', '[]'::jsonb)"
+                f") AS c WHERE c LIKE :{param_name} "
+                f"UNION ALL "
+                f"SELECT 1 FROM jsonb_array_elements_text("
+                f"COALESCE(full_record->'segmentCodes'->'wz2025', '[]'::jsonb)"
+                f") AS c WHERE c LIKE :{param_name})"
+            ).bindparams(**{param_name: f"{wc}%"}))
+        query = query.where(or_(*wz_conditions))
+
     # Filter by employee count (now using dedicated indexed column)
     if employee_min is not None:
         query = query.where(Company.employee_count >= employee_min)
@@ -224,6 +260,7 @@ async def search_companies(
     legal_form: Optional[str] = Query(None, description="Filter by legal form"),
     city: Optional[str] = Query(None, description="Filter by city"),
     postal_code: Optional[str] = Query(None, description="Filter by postal code (prefix match, comma-separated for multiple)"),
+    wz_code: Optional[str] = Query(None, description="Filter by WZ industry code (prefix match, comma-separated for multiple)"),
     employee_min: Optional[int] = Query(None, ge=0, description="Minimum employee count"),
     employee_max: Optional[int] = Query(None, ge=0, description="Maximum employee count"),
     revenue_min: Optional[float] = Query(None, ge=0, description="Minimum revenue in EUR"),
@@ -234,12 +271,11 @@ async def search_companies(
 ):
     """Search companies with optional filters. Uses OpenSearch if available, PostgreSQL as fallback."""
 
-    # Employee/revenue filters now use indexed columns, so we can use PostgreSQL efficiently
-    # OpenSearch is still preferred for text search, but we fall back to PostgreSQL for
-    # employee/revenue filters until OpenSearch is updated with these fields
+    # Employee/revenue/WZ filters require PostgreSQL (not available in OpenSearch)
     use_postgres_for_filters = (
         employee_min is not None or employee_max is not None or
-        revenue_min is not None or revenue_max is not None
+        revenue_min is not None or revenue_max is not None or
+        wz_code is not None
     )
 
     # Try OpenSearch first (unless we need employee/revenue filters)
@@ -248,7 +284,7 @@ async def search_companies(
     if os_client and q:  # Only use OpenSearch for text search
         try:
             items, total = await search_companies_opensearch(
-                os_client, q, status, legal_form, city, postal_code, limit, offset
+                os_client, q, status, legal_form, city, postal_code, wz_code, limit, offset
             )
             logger.debug(f"OpenSearch search returned {len(items)} results")
 
@@ -290,7 +326,7 @@ async def search_companies(
 
     # Fallback to PostgreSQL
     companies, total = await search_companies_postgres(
-        db, q, status, legal_form, city, postal_code,
+        db, q, status, legal_form, city, postal_code, wz_code,
         employee_min, employee_max, revenue_min, revenue_max,
         limit, offset
     )
