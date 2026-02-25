@@ -811,7 +811,9 @@ def run_reindex_fast():
             SELECT company_id, raw_name, legal_name, legal_form, status, terminated,
                    register_unique_key, register_id, address_city, address_postal_code,
                    address_country, email, website, domain, employee_count, last_revenue,
-                   last_update_time
+                   last_update_time,
+                   full_record->'segmentCodes'->'wz' AS wz_codes,
+                   full_record->'segmentCodes'->'wz2025' AS wz2025_codes
             FROM company
         """)
 
@@ -826,6 +828,11 @@ def run_reindex_fast():
             # Build batch
             os_batch = []
             for row in rows:
+                # Merge wz and wz2025 codes into a single list for OpenSearch
+                wz_codes = row[17] or []  # full_record.segmentCodes.wz
+                wz2025_codes = row[18] or []  # full_record.segmentCodes.wz2025
+                all_wz = list(set(wz_codes + wz2025_codes)) if (wz_codes or wz2025_codes) else []
+
                 os_batch.append({
                     "_index": COMPANY_INDEX,
                     "_id": row[0],
@@ -847,6 +854,7 @@ def run_reindex_fast():
                         "employee_count": row[14],
                         "last_revenue": row[15],
                         "last_update_time": row[16].isoformat() if row[16] else None,
+                        "segment_codes_wz": all_wz,
                     }
                 })
 

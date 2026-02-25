@@ -271,11 +271,10 @@ async def search_companies(
 ):
     """Search companies with optional filters. Uses OpenSearch if available, PostgreSQL as fallback."""
 
-    # Employee/revenue/WZ filters require PostgreSQL (not available in OpenSearch)
+    # Employee/revenue filters require PostgreSQL (not available in OpenSearch)
     use_postgres_for_filters = (
         employee_min is not None or employee_max is not None or
-        revenue_min is not None or revenue_max is not None or
-        wz_code is not None
+        revenue_min is not None or revenue_max is not None
     )
 
     # Try OpenSearch first (unless we need employee/revenue filters)
