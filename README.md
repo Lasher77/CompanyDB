@@ -258,6 +258,28 @@ curl http://localhost:8000/imports/{job-id}
 curl http://localhost:8000/imports
 ```
 
+### Quartals-Update (neuer NorthData-Export)
+
+Der Import arbeitet als **Upsert**: Die neue JSONL-Datei kann einfach über den
+normalen Import eingespielt werden – ein vorheriger Reset der Datenbank ist
+nicht nötig.
+
+- **Neue Firmen/Personen** werden angelegt.
+- **Bestehende Firmen/Personen** (gleiche `company_id`/`person_id`) werden mit
+  den Daten aus der Datei aktualisiert (Adresse, Status, Finanzkennzahlen,
+  Kontaktdaten, `full_record` inkl. Historie).
+- **Firma-Person-Beziehungen** der in der Datei enthaltenen Firmen werden
+  komplett ersetzt – ausgeschiedene Rollen (z. B. ehemalige Geschäftsführer)
+  verschwinden damit.
+- Firmen, die in der neuen Datei nicht mehr vorkommen, bleiben unverändert
+  erhalten (es wird nichts gelöscht).
+
+Nach dem Import muss OpenSearch neu indexiert werden:
+
+```bash
+curl -X POST http://localhost:8000/imports/reindex
+```
+
 ---
 
 ## Konfiguration
