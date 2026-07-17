@@ -309,16 +309,33 @@ def escape_copy_value(value) -> str:
 
 
 def run_import_job_fast(job_id: UUID, file_path: Path):
-    """Ultra-fast import using PostgreSQL COPY and streaming."""
+    """Ultra-fast upsert import using PostgreSQL COPY into staging tables.
+
+    The file is streamed via COPY into per-job UNLOGGED staging tables, then
+    merged into the live tables with INSERT ... ON CONFLICT DO UPDATE:
+    - New companies/persons are inserted.
+    - Existing companies/persons are updated with the data from the file
+      (NorthData exports always contain the full current state incl. history).
+    - Company-person relationships of every company in the file are replaced,
+      so e.g. resigned managing directors disappear.
+    """
     from sqlalchemy.orm import sessionmaker
 
     SessionLocal = sessionmaker(bind=sync_engine)
-    COMPANY_INDEX = "companies"
-    PERSON_INDEX = "persons"
 
     # Initialize variables for cleanup in except block
     raw_conn = None
     cursor = None
+
+    # Per-job staging table names so concurrent jobs cannot clash
+    suffix = job_id.hex
+    stg_company = f"staging_company_{suffix}"
+    stg_person = f"staging_person_{suffix}"
+    stg_rel = f"staging_company_person_{suffix}"
+
+    def drop_staging_tables(cur, conn):
+        cur.execute(f"DROP TABLE IF EXISTS {stg_company}, {stg_person}, {stg_rel}")
+        conn.commit()
 
     with SessionLocal() as db:
         job = db.query(ImportJob).filter(ImportJob.id == job_id).first()
@@ -340,92 +357,107 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
         db.commit()
 
         try:
-            # Initialize OpenSearch if enabled
-            os_client = None
-            if settings.opensearch_enabled:
-                try:
-                    from ..opensearch_client import get_opensearch_client, init_opensearch_indices
-                    os_client = get_opensearch_client()
-                    init_opensearch_indices(os_client)
-                    logger.info("OpenSearch initialized successfully")
-                except Exception as e:
-                    logger.warning(f"OpenSearch not available, skipping indexing: {e}")
-                    os_client = None
-
             # Get raw PostgreSQL connection for COPY
             raw_conn = sync_engine.raw_connection()
             cursor = raw_conn.cursor()
 
-            # SMART LOADING: For small files, only load IDs from the file first
-            # For large files, load all existing IDs
-            SMALL_FILE_THRESHOLD = 10000
+            # Create staging tables (UNLOGGED = no WAL = fast)
+            logger.info("Creating staging tables...")
+            cursor.execute(f"DROP TABLE IF EXISTS {stg_company}, {stg_person}, {stg_rel}")
+            cursor.execute(f"""
+                CREATE UNLOGGED TABLE {stg_company} (
+                    import_job_id UUID,
+                    company_id TEXT,
+                    raw_name TEXT,
+                    legal_name TEXT,
+                    legal_form TEXT,
+                    status TEXT,
+                    terminated BOOLEAN,
+                    register_unique_key TEXT,
+                    register_id TEXT,
+                    address_city TEXT,
+                    address_postal_code TEXT,
+                    address_country TEXT,
+                    email TEXT,
+                    website TEXT,
+                    phone TEXT,
+                    domain TEXT,
+                    employee_count INTEGER,
+                    last_revenue DOUBLE PRECISION,
+                    last_update_time TIMESTAMPTZ,
+                    full_record JSONB,
+                    created_at TIMESTAMPTZ
+                )
+            """)
+            cursor.execute(f"""
+                CREATE UNLOGGED TABLE {stg_person} (
+                    person_id TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    birth_year INTEGER,
+                    address_city TEXT,
+                    full_record JSONB,
+                    created_at TIMESTAMPTZ
+                )
+            """)
+            cursor.execute(f"""
+                CREATE UNLOGGED TABLE {stg_rel} (
+                    company_id TEXT,
+                    person_id TEXT,
+                    role_type TEXT,
+                    role_description TEXT
+                )
+            """)
+            raw_conn.commit()
 
-            if job.total_lines < SMALL_FILE_THRESHOLD:
-                # SMALL FILE: Extract IDs from file, then query only those
-                logger.info(f"Small file ({job.total_lines} lines) - using targeted ID loading")
-                file_company_ids = set()
-                file_person_ids = set()
-
-                with open(file_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json_loads(line)
-                            if record.get("id"):
-                                # Convert to string for consistent comparison
-                                file_company_ids.add(str(record["id"]))
-                            for rp in record.get("relatedPersons", {}).get("items", []):
-                                person_data = rp.get("person", {})
-                                if person_data.get("id"):
-                                    file_person_ids.add(str(person_data["id"]))
-                        except Exception as e:
-                            logger.warning(f"Error extracting IDs: {e}")
-                            continue
-
-                logger.info(f"Found {len(file_company_ids)} companies, {len(file_person_ids)} persons in file")
-
-                # Query only relevant IDs
-                existing_company_ids = set()
-                existing_person_ids = set()
-
-                if file_company_ids:
-                    placeholders = ','.join(['%s'] * len(file_company_ids))
-                    cursor.execute(f"SELECT company_id FROM company WHERE company_id IN ({placeholders})", tuple(file_company_ids))
-                    existing_company_ids = {row[0] for row in cursor.fetchall()}
-
-                if file_person_ids:
-                    placeholders = ','.join(['%s'] * len(file_person_ids))
-                    cursor.execute(f"SELECT person_id FROM person WHERE person_id IN ({placeholders})", tuple(file_person_ids))
-                    existing_person_ids = {row[0] for row in cursor.fetchall()}
-
-                logger.info(f"Found {len(existing_company_ids)} existing companies, {len(existing_person_ids)} existing persons")
-            else:
-                # LARGE FILE: Load all existing IDs (faster for bulk operations)
-                logger.info(f"Large file ({job.total_lines} lines) - loading all existing IDs")
-                cursor.execute("SELECT company_id FROM company")
-                existing_company_ids = {row[0] for row in cursor.fetchall()}
-
-                cursor.execute("SELECT person_id FROM person")
-                existing_person_ids = {row[0] for row in cursor.fetchall()}
-
-                logger.info(f"Loaded {len(existing_company_ids)} existing companies, {len(existing_person_ids)} existing persons")
-
-            # Initialize buffers and tracking
+            # Initialize buffers and tracking.
+            # Dedup only within the file - existing DB rows get updated, not skipped.
             company_buffer = io.StringIO()
             person_buffer = io.StringIO()
-            new_person_ids = set()
-            relationships_data = []
-            os_company_batch = []
+            rel_buffer = io.StringIO()
+            seen_company_ids = set()
+            seen_person_ids = set()
 
             # Tracking
             processed = 0
             companies_count = 0
             persons_count = 0
+            rel_count = 0
+            last_flushed_companies = 0
             batch_size = 50000
 
-            logger.info("Starting streaming import...")
+            def flush_staging_buffers():
+                nonlocal company_buffer, person_buffer, rel_buffer
+                if company_buffer.tell() > 0:
+                    company_buffer.seek(0)
+                    cursor.copy_from(
+                        company_buffer, stg_company,
+                        columns=('import_job_id', 'company_id', 'raw_name', 'legal_name', 'legal_form',
+                                'status', 'terminated', 'register_unique_key', 'register_id',
+                                'address_city', 'address_postal_code', 'address_country',
+                                'email', 'website', 'phone', 'domain',
+                                'employee_count', 'last_revenue',
+                                'last_update_time', 'full_record', 'created_at')
+                    )
+                if person_buffer.tell() > 0:
+                    person_buffer.seek(0)
+                    cursor.copy_from(
+                        person_buffer, stg_person,
+                        columns=('person_id', 'first_name', 'last_name', 'birth_year',
+                                'address_city', 'full_record', 'created_at')
+                    )
+                if rel_buffer.tell() > 0:
+                    rel_buffer.seek(0)
+                    cursor.copy_from(
+                        rel_buffer, stg_rel,
+                        columns=('company_id', 'person_id', 'role_type', 'role_description')
+                    )
+                raw_conn.commit()
+                company_buffer = io.StringIO()
+                person_buffer = io.StringIO()
+                rel_buffer = io.StringIO()
+
+            logger.info("Starting streaming into staging tables...")
 
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -443,19 +475,13 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
 
                     company_id = record.get("id", "")
 
-                    # Debug: Log first few companies
-                    if processed < 3:
-                        logger.info(f"Processing company_id={company_id} (type={type(company_id).__name__})")
-                        logger.info(f"existing_company_ids sample: {list(existing_company_ids)[:3]} (types: {[type(x).__name__ for x in list(existing_company_ids)[:3]]})")
-
-                    # Skip if company already exists - convert to string for comparison
+                    # Skip duplicates within the same file
                     company_id_str = str(company_id)
-                    if company_id_str in existing_company_ids:
+                    if company_id_str in seen_company_ids:
                         processed += 1
                         continue
 
-                    # Mark as existing to avoid duplicates in this import
-                    existing_company_ids.add(company_id_str)
+                    seen_company_ids.add(company_id_str)
 
                     # Extract fields
                     name_obj = record.get("name", {})
@@ -517,15 +543,22 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                         if not person_id:
                             continue
 
-                        # Store relationship data (minimal)
+                        # Relationship goes straight into the staging buffer
                         roles = rp.get("roles", [])
                         role_type = roles[0].get("type") if roles else rp.get("description")
                         role_desc = rp.get("description")
-                        relationships_data.append((company_id, person_id, role_type, role_desc))
+                        rel_line = "\t".join([
+                            escape_copy_value(company_id),
+                            escape_copy_value(person_id),
+                            escape_copy_value(role_type),
+                            escape_copy_value(role_desc),
+                        ])
+                        rel_buffer.write(rel_line + "\n")
+                        rel_count += 1
 
-                        # Add person if not exists
-                        if person_id not in existing_person_ids and person_id not in new_person_ids:
-                            new_person_ids.add(person_id)
+                        # Stage person once per file
+                        if person_id not in seen_person_ids:
+                            seen_person_ids.add(person_id)
 
                             person_name = person_data.get("name", {})
                             person_address = person_data.get("address", {})
@@ -547,39 +580,20 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                     processed += 1
 
                     # Flush buffers periodically
-                    if companies_count > 0 and companies_count % batch_size == 0:
+                    if companies_count - last_flushed_companies >= batch_size:
+                        last_flushed_companies = companies_count
                         logger.info(f"Flushing batch at {companies_count} companies...")
+                        flush_staging_buffers()
 
-                        # COPY companies
-                        company_buffer.seek(0)
-                        cursor.copy_from(
-                            company_buffer,
-                            'company',
-                            columns=('import_job_id', 'company_id', 'raw_name', 'legal_name', 'legal_form',
-                                    'status', 'terminated', 'register_unique_key', 'register_id',
-                                    'address_city', 'address_postal_code', 'address_country',
-                                    'email', 'website', 'phone', 'domain',
-                                    'employee_count', 'last_revenue',
-                                    'last_update_time', 'full_record', 'created_at')
-                        )
+                        # Update progress and honor cancellation
+                        db.refresh(job)
+                        if job.status == "cancelled":
+                            logger.info(f"Import job {job_id} cancelled, cleaning up staging tables")
+                            drop_staging_tables(cursor, raw_conn)
+                            cursor.close()
+                            raw_conn.close()
+                            return
 
-                        # COPY persons
-                        person_buffer.seek(0)
-                        if person_buffer.tell() > 0 or person_buffer.getvalue():
-                            cursor.copy_from(
-                                person_buffer,
-                                'person',
-                                columns=('person_id', 'first_name', 'last_name', 'birth_year',
-                                        'address_city', 'full_record', 'created_at')
-                            )
-
-                        raw_conn.commit()
-
-                        # Reset buffers
-                        company_buffer = io.StringIO()
-                        person_buffer = io.StringIO()
-
-                        # Update progress
                         job.processed_lines = processed
                         job.companies_imported = companies_count
                         job.persons_imported = persons_count
@@ -588,102 +602,121 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
 
                         logger.info(f"Progress: {processed}/{job.total_lines} lines, {companies_count} companies, {persons_count} persons")
 
-            # Final flush
-            logger.info("Final flush...")
-            company_buffer.seek(0)
-            company_data = company_buffer.getvalue()
-            if company_data:
-                company_buffer = io.StringIO(company_data)
-                cursor.copy_from(
-                    company_buffer,
-                    'company',
-                    columns=('import_job_id', 'company_id', 'raw_name', 'legal_name', 'legal_form',
-                            'status', 'terminated', 'register_unique_key', 'register_id',
-                            'address_city', 'address_postal_code', 'address_country',
-                            'email', 'website', 'phone', 'domain',
-                            'employee_count', 'last_revenue',
-                            'last_update_time', 'full_record', 'created_at')
-                )
+            # Final flush into staging
+            logger.info("Final staging flush...")
+            flush_staging_buffers()
+            logger.info(f"Staged: {companies_count} companies, {persons_count} persons, {rel_count} relationships")
 
-            person_buffer.seek(0)
-            person_data = person_buffer.getvalue()
-            if person_data:
-                person_buffer = io.StringIO(person_data)
-                cursor.copy_from(
-                    person_buffer,
-                    'person',
-                    columns=('person_id', 'first_name', 'last_name', 'birth_year',
-                            'address_city', 'full_record', 'created_at')
-                )
+            # Free dedup memory before the merge phase
+            seen_company_ids = None
+            seen_person_ids = None
 
+            # ===== MERGE PHASE =====
+            # Give PostgreSQL more memory for the joins/sorts below
+            try:
+                cursor.execute(f"SET work_mem = '{settings.pg_work_mem}'")
+            except Exception as e:
+                logger.warning(f"Could not set work_mem: {e}")
+
+            cursor.execute(f"ANALYZE {stg_company}")
+            cursor.execute(f"ANALYZE {stg_person}")
+            cursor.execute(f"ANALYZE {stg_rel}")
+
+            # Count how many rows will be updates vs. inserts (for logging)
+            cursor.execute(f"SELECT COUNT(*) FROM {stg_company} s JOIN company c ON c.company_id = s.company_id")
+            companies_updated = cursor.fetchone()[0]
+            cursor.execute(f"SELECT COUNT(*) FROM {stg_person} s JOIN person p ON p.person_id = s.person_id")
+            persons_updated = cursor.fetchone()[0]
+            logger.info(
+                f"Merging companies: {companies_count - companies_updated} new, {companies_updated} to update; "
+                f"persons: {persons_count - persons_updated} new, {persons_updated} to update"
+            )
+
+            # Upsert companies (created_at is kept from the original insert)
+            logger.info("Upserting companies...")
+            cursor.execute(f"""
+                INSERT INTO company (import_job_id, company_id, raw_name, legal_name, legal_form,
+                                     status, terminated, register_unique_key, register_id,
+                                     address_city, address_postal_code, address_country,
+                                     email, website, phone, domain,
+                                     employee_count, last_revenue, last_update_time,
+                                     full_record, created_at)
+                SELECT import_job_id, company_id, raw_name, legal_name, legal_form,
+                       status, terminated, register_unique_key, register_id,
+                       address_city, address_postal_code, address_country,
+                       email, website, phone, domain,
+                       employee_count, last_revenue, last_update_time,
+                       full_record, created_at
+                FROM {stg_company}
+                ON CONFLICT (company_id) DO UPDATE SET
+                    import_job_id = EXCLUDED.import_job_id,
+                    raw_name = EXCLUDED.raw_name,
+                    legal_name = EXCLUDED.legal_name,
+                    legal_form = EXCLUDED.legal_form,
+                    status = EXCLUDED.status,
+                    terminated = EXCLUDED.terminated,
+                    register_unique_key = EXCLUDED.register_unique_key,
+                    register_id = EXCLUDED.register_id,
+                    address_city = EXCLUDED.address_city,
+                    address_postal_code = EXCLUDED.address_postal_code,
+                    address_country = EXCLUDED.address_country,
+                    email = EXCLUDED.email,
+                    website = EXCLUDED.website,
+                    phone = EXCLUDED.phone,
+                    domain = EXCLUDED.domain,
+                    employee_count = EXCLUDED.employee_count,
+                    last_revenue = EXCLUDED.last_revenue,
+                    last_update_time = EXCLUDED.last_update_time,
+                    full_record = EXCLUDED.full_record
+            """)
             raw_conn.commit()
-            logger.info(f"Companies and persons imported: {companies_count} companies, {persons_count} persons")
+            logger.info("Companies merged")
 
-            # Now create relationships
-            logger.info(f"Creating {len(relationships_data)} relationships...")
-
-            # Load ID mappings
-            cursor.execute("SELECT id, company_id FROM company")
-            company_id_map = {row[1]: row[0] for row in cursor.fetchall()}
-
-            cursor.execute("SELECT id, person_id FROM person")
-            person_id_map = {row[1]: row[0] for row in cursor.fetchall()}
-
-            # Load existing relationships
-            cursor.execute("SELECT company_db_id, person_db_id, role_type FROM company_person")
-            existing_rels = {(row[0], row[1], row[2]) for row in cursor.fetchall()}
-
-            # Build relationship buffer
-            rel_buffer = io.StringIO()
-            rel_count = 0
-
-            for company_ext_id, person_ext_id, role_type, role_desc in relationships_data:
-                company_db_id = company_id_map.get(company_ext_id)
-                person_db_id = person_id_map.get(person_ext_id)
-
-                if not company_db_id or not person_db_id:
-                    continue
-
-                rel_key = (company_db_id, person_db_id, role_type)
-                if rel_key in existing_rels:
-                    continue
-
-                existing_rels.add(rel_key)
-
-                rel_line = "\t".join([
-                    escape_copy_value(company_db_id),
-                    escape_copy_value(person_db_id),
-                    escape_copy_value(role_type),
-                    escape_copy_value(role_desc),
-                    escape_copy_value(None),  # role_date
-                ])
-                rel_buffer.write(rel_line + "\n")
-                rel_count += 1
-
-                # Flush periodically
-                if rel_count % 100000 == 0:
-                    rel_buffer.seek(0)
-                    cursor.copy_from(
-                        rel_buffer,
-                        'company_person',
-                        columns=('company_db_id', 'person_db_id', 'role_type', 'role_description', 'role_date')
-                    )
-                    raw_conn.commit()
-                    rel_buffer = io.StringIO()
-                    logger.info(f"Inserted {rel_count} relationships...")
-
-            # Final relationship flush
-            rel_buffer.seek(0)
-            rel_data = rel_buffer.getvalue()
-            if rel_data:
-                rel_buffer = io.StringIO(rel_data)
-                cursor.copy_from(
-                    rel_buffer,
-                    'company_person',
-                    columns=('company_db_id', 'person_db_id', 'role_type', 'role_description', 'role_date')
-                )
+            # Upsert persons (created_at is kept from the original insert)
+            logger.info("Upserting persons...")
+            cursor.execute(f"""
+                INSERT INTO person (person_id, first_name, last_name, birth_year,
+                                    address_city, full_record, created_at)
+                SELECT person_id, first_name, last_name, birth_year,
+                       address_city, full_record, created_at
+                FROM {stg_person}
+                ON CONFLICT (person_id) DO UPDATE SET
+                    first_name = EXCLUDED.first_name,
+                    last_name = EXCLUDED.last_name,
+                    birth_year = EXCLUDED.birth_year,
+                    address_city = EXCLUDED.address_city,
+                    full_record = EXCLUDED.full_record
+            """)
             raw_conn.commit()
-            logger.info(f"Relationships created: {rel_count}")
+            logger.info("Persons merged")
+
+            # Replace relationships for every company contained in the file,
+            # so roles that no longer exist (e.g. former managing directors) are removed.
+            logger.info("Replacing relationships for imported companies...")
+            cursor.execute(f"""
+                DELETE FROM company_person cp
+                USING company c
+                WHERE cp.company_db_id = c.id
+                  AND c.company_id IN (SELECT company_id FROM {stg_company})
+            """)
+            deleted_rels = cursor.rowcount
+            cursor.execute(f"""
+                INSERT INTO company_person (company_db_id, person_db_id, role_type, role_description, role_date)
+                SELECT DISTINCT c.id, p.id, s.role_type, s.role_description, NULL::date
+                FROM {stg_rel} s
+                JOIN company c ON c.company_id = s.company_id
+                JOIN person p ON p.person_id = s.person_id
+            """)
+            inserted_rels = cursor.rowcount
+            raw_conn.commit()
+            logger.info(f"Relationships replaced: {deleted_rels} removed, {inserted_rels} inserted")
+
+            # Drop staging tables
+            drop_staging_tables(cursor, raw_conn)
+            logger.info(
+                f"Merge completed: companies {companies_count - companies_updated} new / {companies_updated} updated, "
+                f"persons {persons_count - persons_updated} new / {persons_updated} updated"
+            )
 
             # Recreate indexes
             logger.info("Recreating indexes...")
@@ -698,23 +731,6 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
                 logger.info("Indexes recreated successfully")
             except Exception as e:
                 logger.warning(f"Could not recreate indexes: {e}")
-
-            # Bulk index to OpenSearch
-            if os_client and os_company_batch:
-                logger.info(f"Bulk indexing {len(os_company_batch)} companies to OpenSearch...")
-                # Index in chunks of 5000
-                for i in range(0, len(os_company_batch), 5000):
-                    chunk = os_company_batch[i:i+5000]
-                    bulk_index(os_client, chunk)
-                    logger.info(f"Indexed {min(i+5000, len(os_company_batch))}/{len(os_company_batch)} companies")
-
-            # Skip expensive person indexing for small imports - use reindex instead
-            # The old code loaded ALL relationships into memory which caused 40GB+ memory usage
-            if os_client:
-                logger.info("Skipping person OpenSearch indexing during import (use /imports/reindex instead)")
-                # Refresh company index only
-                os_client.indices.refresh(index=COMPANY_INDEX)
-                logger.info(f"OpenSearch company indexing completed: {companies_count} companies")
 
             # Close PostgreSQL connection
             try:
@@ -739,6 +755,8 @@ def run_import_job_fast(job_id: UUID, file_path: Path):
             try:
                 if raw_conn:
                     raw_conn.rollback()
+                if cursor and raw_conn:
+                    drop_staging_tables(cursor, raw_conn)
                 if cursor:
                     cursor.close()
                 if raw_conn:
